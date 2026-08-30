@@ -14,3 +14,12 @@ repository's initial implementation.
    and returns normalized events.
 5. Keep slot policy, TX disarm, QSO sequencing, logging, PSK reporting, and
    presentation in each consumer until shared requirements are demonstrated.
+
+## Audio integration rule
+
+Do not reinterpret the station's full-rate capture as a narrowband decoder
+block. Fan out the capture stream first, then create the adapter-specific
+`AudioBlock` with a stateful anti-aliased resampler. For the current WSJT
+adapters, that block is 12 kHz mono; the capture stream may remain 48 kHz for
+the waterfall, monitor, recording, or other consumers. See
+[AUDIO-BOUNDARY.md](AUDIO-BOUNDARY.md).

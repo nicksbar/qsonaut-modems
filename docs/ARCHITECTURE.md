@@ -24,3 +24,8 @@ desktop audio API or an Android lifecycle.
 `SlotGate` is a reusable timing primitive, not a scheduler. A consumer remains
 responsible for clock selection, buffering, TX-slot suppression, cancellation,
 and worker ownership.
+
+The distinction between a full-rate capture stream and a modem-specific
+decoder stream is normative. See
+[AUDIO-BOUNDARY.md](AUDIO-BOUNDARY.md) before adding rate conversion or slot
+assembly to a consumer.

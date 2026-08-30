@@ -30,3 +30,6 @@ Git revision or published version only when a release workflow is justified.
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the ownership boundary
 and [docs/CONSUMER-INTEGRATION.md](docs/CONSUMER-INTEGRATION.md) for the
 planned QSONaut/QSONoid migration.
+
+The capture-versus-decoder-rate contract is documented in
+[docs/AUDIO-BOUNDARY.md](docs/AUDIO-BOUNDARY.md).
