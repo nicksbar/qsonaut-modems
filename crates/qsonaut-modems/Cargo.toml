@@ -1,0 +1,11 @@
+[package]
+name = "qsonaut-modems"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "First-party contracts and timing primitives for QSONaut modem consumers"
+repository = "https://github.com/nicksbar/qsonaut-modems"
+
+[dependencies]
+thiserror.workspace = true
