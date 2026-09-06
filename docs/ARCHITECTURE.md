@@ -25,6 +25,13 @@ desktop audio API or an Android lifecycle.
 responsible for clock selection, buffering, TX-slot suppression, cancellation,
 and worker ownership.
 
+Voice contracts are also consumer-neutral. `VoiceModemCapabilities` describes
+the modem and speech rates, direction support, and development status;
+`VoiceRxBlock` carries decoded speech with normalized synchronization
+diagnostics; and `VoiceTxBlock` carries validated speech input. These types do
+not name RADE, own a native library, or prescribe a GUI mode. Protocol-specific
+adapters translate their upstream APIs into these contracts.
+
 The distinction between a full-rate capture stream and a modem-specific
 decoder stream is normative. See
 [AUDIO-BOUNDARY.md](AUDIO-BOUNDARY.md) before adding rate conversion or slot

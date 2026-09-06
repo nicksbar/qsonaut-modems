@@ -8,6 +8,10 @@ not contain third-party protocol implementations and does not own audio
 devices, Android lifecycle, GUI state, radio control, TX scheduling, QSO
 automation, or persistence.
 
+It also defines generic voice-modem contracts for capabilities, streaming
+speech blocks, synchronization state, and receive diagnostics. Voice protocol
+implementations remain in `qsonaut-third-party`.
+
 ## Consumers
 
 QSONaut and QSONoid will consume this crate through adapters from
