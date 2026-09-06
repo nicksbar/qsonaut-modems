@@ -2,7 +2,8 @@
 //!
 //! This crate deliberately does not contain protocol algorithms, audio-device
 //! ownership, GUI state, radio control, TX scheduling, or QSO automation.
-//! Those belong in an adapter or consumer application.
+//! Protocol implementations live in sibling first-party crates or external
+//! adapter repositories, not in this generic contract crate.
 
 mod audio;
 mod events;

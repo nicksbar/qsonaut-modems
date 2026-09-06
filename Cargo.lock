@@ -12,6 +12,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "qsonaut-js8"
+version = "0.1.0"
+dependencies = [
+ "qsonaut-modems",
+ "thiserror",
+]
+
+[[package]]
 name = "qsonaut-modems"
 version = "0.1.0"
 dependencies = [

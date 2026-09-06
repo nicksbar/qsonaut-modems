@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/qsonaut-modems"]
+members = ["crates/qsonaut-modems", "crates/js8"]
 resolver = "2"
 
 [workspace.package]
