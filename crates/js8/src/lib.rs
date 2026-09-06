@@ -15,6 +15,7 @@ mod frame;
 mod messages;
 mod metrics;
 mod mode;
+mod receiver;
 mod scan;
 mod sync;
 mod synth;
@@ -38,6 +39,7 @@ pub use metrics::{
 };
 pub use mode::Js8Mode;
 pub use qsonaut_modems::AudioBlock;
+pub use receiver::Js8RxSession;
 pub use scan::{scan_audio_block, scan_audio_block_detailed, Js8ScanConfig, Js8ScanResult};
 pub use sync::{demodulate_aligned, estimate_base_frequency, find_symbol_boundary};
 pub use synth::{

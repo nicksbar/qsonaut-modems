@@ -11,6 +11,9 @@ All notable changes to `qsonaut-modems` are documented here.
   the original projects and identifies the upstream compatibility material it
   reproduces.
 - Added the first-party `qsonaut-js8` crate under `crates/js8`.
+- Added a bounded `Js8RxSession` for chunk-fed 12 kHz RX buffering and
+  cancellation-friendly candidate polling without taking ownership of capture,
+  clocks, workers, slot policy, or UI state.
 - Added JS8 TX/RX support for Normal, Fast, Turbo, Slow, and Ultra modes.
 - Added JS8 alphabet packing, CRC-12 validation, `(174,87)` LDPC decoding,
   Costas synchronization, bounded recording scanning, and generic modem adapter

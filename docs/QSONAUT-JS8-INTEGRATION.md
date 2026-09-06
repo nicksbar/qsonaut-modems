@@ -19,6 +19,27 @@ The JS8 crate already depends on the generic contracts crate and exposes the
 adapter APIs below. QSONaut does not need a protocol-specific dependency in
 `qsonaut-modems` itself.
 
+For a live receiver worker, use `Js8RxSession` from the JS8 crate. It accepts
+already-normalized 12 kHz chunks, keeps a bounded slot-sized buffer, and
+performs a caller-selected number of candidate decodes per `poll()` call. It
+does not own a capture device, clock, worker, cancellation token, slot policy,
+or UI state:
+
+```rust
+use qsonaut_js8::{Js8RxConfig, Js8RxSession, Js8ScanConfig};
+
+let mut receiver = Js8RxSession::new(Js8RxConfig::default(), Js8ScanConfig::default());
+receiver.push_samples(&samples_12k_chunk)?;
+for result in receiver.poll(2)? {
+  // Map result.result.event and result.result.message into the UI.
+  println!("{} at sample {}", result.result.event.message, result.candidate_sample);
+}
+```
+
+`poll()` is intentionally bounded rather than an implicit background loop. The
+consumer can run it on its modem worker, check cancellation between calls, and
+decide when a slot is complete or should be reset.
+
 ## TX path
 
 Build a validated 12 kHz mono block. The returned samples are normalized
@@ -242,6 +263,9 @@ smaller step improves acquisition of unknown signal starts but costs more CPU.
   commands, and application events remain consumer/message layers.
 - The current public adapter is aligned to one frame/window, not a complete
   multi-signal 60-second JS8Call receiver.
+- `Js8RxSession` provides bounded chunk ingestion and candidate polling for a
+  consumer-owned worker. It is not a clock or slot scheduler; QSONaut still
+  owns capture timing, `SlotGate`, cancellation, and lifecycle decisions.
 
 Do not claim full JS8Call interoperability until oracle-generated audio,
 frequency/time offset sweeps, deterministic noise fixtures, and no-decode
