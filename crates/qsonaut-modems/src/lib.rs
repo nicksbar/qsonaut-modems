@@ -7,6 +7,7 @@
 mod audio;
 mod events;
 mod timing;
+mod voice;
 
 pub use audio::{
     extract_aligned_window, normalize_pcm16_interleaved, normalize_pcm16_mono, AudioBlock,
@@ -14,3 +15,7 @@ pub use audio::{
 };
 pub use events::{DecodeBatch, DecodeEvent, DecodeTelemetry, ModemId};
 pub use timing::{SlotGate, SlotSpec};
+pub use voice::{
+    VoiceDirection, VoiceModemCapabilities, VoiceRxBlock, VoiceRxStatus, VoiceSyncState,
+    VoiceTxBlock,
+};
