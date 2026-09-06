@@ -26,6 +26,15 @@ using the official JS8Call implementation as the compatibility oracle.
 A Rust implementation is preferable to binding the whole Qt application, but it
 must be proven against upstream before it is presented as interoperable.
 
+This work is an independent Rust implementation, not a claim of authorship of
+JS8, JS8Call, or WSJT-X. We thank the JS8Call and WSJT-X authors and
+contributors for the original modem, protocol, documentation, and engineering
+work. Upstream source and behavior informed the compatibility work; the
+implementation in this repository was written as focused Rust modules rather
+than by copying upstream C, C++, Fortran, Qt, or build-system files. See
+[`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md) for the detailed
+provenance and repository-content boundary.
+
 ## Boundary rules
 
 ### Generic contracts (`qsonaut-modems`)
@@ -95,6 +104,10 @@ directory to copy into `qsonaut-modems`. Future scripts should accept an
 `JS8CALL_ORACLE_DIR` environment variable and verify the expected revision
 before generating or updating fixtures. A fixture update must record both the
 oracle revision and the generator version.
+
+No JS8Call or WSJT-X source checkout, native source file, or external media
+fixture is tracked in this repository. The optional media test reads files
+from the external oracle checkout only when `JS8CALL_MEDIA_TESTS` is set.
 
 ### Oracle source map
 

@@ -45,3 +45,7 @@ generic crate remains protocol-neutral.
 
 The consumer-facing JS8 TX/RX adapter and migration checklist are documented
 in [docs/QSONAUT-JS8-INTEGRATION.md](docs/QSONAUT-JS8-INTEGRATION.md).
+
+The JS8 implementation's upstream attribution, provenance, licensing boundary,
+and explicit list of non-bundled upstream materials are documented in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

@@ -6,6 +6,10 @@ All notable changes to `qsonaut-modems` are documented here.
 
 ### Added
 
+- Added explicit JS8Call and WSJT-X attribution, provenance, licensing-boundary,
+  and non-bundled-source notices. The Rust implementation takes no credit for
+  the original projects and identifies the upstream compatibility material it
+  reproduces.
 - Added the first-party `qsonaut-js8` crate under `crates/js8`.
 - Added JS8 TX/RX support for Normal, Fast, Turbo, Slow, and Ultra modes.
 - Added JS8 alphabet packing, CRC-12 validation, `(174,87)` LDPC decoding,
