@@ -16,10 +16,19 @@ driver, radio-control library, protocol implementation, or QSO application.
 - `timing.rs` owns slot descriptions and reusable slot gating.
 - `docs/ARCHITECTURE.md` defines ownership boundaries.
 - `docs/CONSUMER-INTEGRATION.md` is the migration contract for consumers.
+- `crates/js8/src/lib.rs` is only the JS8 crate facade. JS8 implementation
+  behavior belongs in focused sibling modules such as `alphabet.rs`,
+  `frame.rs`, `fec.rs`, `costas.rs`, `mode.rs`, `synth.rs`, `sync.rs`, and
+  `decode.rs`.
 
 Keep new behavior in the narrowest logical module. Do not grow `lib.rs` into a
 single implementation file. Add module-level tests beside the behavior they
 cover and use public integration tests only for cross-module contracts.
+
+For `qsonaut-js8`, do not add protocol logic, large constant tables, or tests
+to `lib.rs` or a monolithic `mod.rs`. Keep public exports in the facade and
+place each physical/protocol responsibility in its own file. Split a module
+before it becomes difficult to review rather than waiting for a later cleanup.
 
 ## Design rules
 
@@ -33,8 +42,9 @@ cover and use public integration tests only for cross-module contracts.
   breaking changes before making them.
 - Keep timing primitives policy-neutral: consumers own clocks, buffering,
   cancellation, TX-slot suppression, and worker lifetimes.
-- Do not add protocol-specific result types here. Protocol adapters belong in
-  `qsonaut-third-party` or a future first-party adapter crate.
+- Do not add protocol-specific result types here. First-party protocol
+  implementations belong in sibling crates such as `qsonaut-js8`; external
+  protocol adapters belong in `qsonaut-third-party`.
 
 ## Consumer safety boundary
 

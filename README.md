@@ -37,3 +37,15 @@ planned QSONaut/QSONoid migration.
 
 The capture-versus-decoder-rate contract is documented in
 [docs/AUDIO-BOUNDARY.md](docs/AUDIO-BOUNDARY.md).
+
+The JS8 protocol research and first-party implementation plan is documented in
+[docs/JS8-PROTOCOL-FOUNDATION.md](docs/JS8-PROTOCOL-FOUNDATION.md). The
+implementation lives in the GPL-licensed `qsonaut-js8` sibling crate; this
+generic crate remains protocol-neutral.
+
+The consumer-facing JS8 TX/RX adapter and migration checklist are documented
+in [docs/QSONAUT-JS8-INTEGRATION.md](docs/QSONAUT-JS8-INTEGRATION.md).
+
+The JS8 implementation's upstream attribution, provenance, licensing boundary,
+and explicit list of non-bundled upstream materials are documented in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

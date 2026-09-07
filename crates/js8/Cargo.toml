@@ -1,0 +1,13 @@
+[package]
+name = "qsonaut-js8"
+version.workspace = true
+edition.workspace = true
+license = "GPL-3.0-or-later"
+authors.workspace = true
+description = "First-party Rust JS8 protocol and modem implementation"
+repository = "https://github.com/nicksbar/qsonaut-modems"
+
+[dependencies]
+qsonaut-modems = { package = "qsonaut-modems", path = "../qsonaut-modems" }
+thiserror.workspace = true
+rustfft.workspace = true
