@@ -36,7 +36,7 @@ pub fn decode_frame(codeword: &[u8; 174]) -> Result<Js8DecodedFrame, Js8DecodeEr
     }
 
     let mut message = String::with_capacity(12);
-    for group in bytes[..9].chunks_exact(3) {
+    for group in bytes[..9].as_chunks::<3>().0 {
         let packed = (u32::from(group[0]) << 16) | (u32::from(group[1]) << 8) | u32::from(group[2]);
         for shift in [18, 12, 6, 0] {
             message.push(ALPHABET[((packed >> shift) & 0x3f) as usize] as char);

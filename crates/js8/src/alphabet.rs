@@ -11,7 +11,7 @@ pub(crate) fn pack_payload(message: &[u8]) -> Result<[u8; 11], Js8EncodeError> {
     }
 
     let mut bytes = [0_u8; 11];
-    for (index, chunk) in message.chunks_exact(4).enumerate() {
+    for (index, chunk) in message.as_chunks::<4>().0.iter().enumerate() {
         let words = (alphabet_word(chunk[0], index * 4)? << 18)
             | (alphabet_word(chunk[1], index * 4 + 1)? << 12)
             | (alphabet_word(chunk[2], index * 4 + 2)? << 6)
