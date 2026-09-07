@@ -3,8 +3,8 @@ use std::collections::VecDeque;
 use qsonaut_modems::AudioBlock;
 
 use crate::{
-    scan_audio_block_detailed, Js8AdapterError, Js8RxConfig, Js8ScanConfig, Js8ScanResult,
-    SAMPLE_RATE_HZ,
+    scan::{scan_audio_block_detailed, subtract_decoded_signal},
+    Js8AdapterError, Js8RxConfig, Js8ScanConfig, Js8ScanResult, SAMPLE_RATE_HZ,
 };
 
 /// Chunk-fed, bounded JS8 receiver state for a consumer-owned modem worker.
@@ -23,9 +23,15 @@ pub struct Js8RxSession {
     capacity_samples: usize,
     frame_samples: usize,
     search_window_samples: usize,
+    reported_results: Vec<(String, usize)>,
 }
 
 impl Js8RxSession {
+    /// Create a streaming receiver using the bounded waterfall-wide profile.
+    pub fn waterfall(rx_config: Js8RxConfig) -> Self {
+        Self::new(rx_config, Js8ScanConfig::waterfall())
+    }
+
     /// Create a session with enough capacity for one nominal JS8 slot.
     pub fn new(rx_config: Js8RxConfig, scan_config: Js8ScanConfig) -> Self {
         let frame_samples = 79 * rx_config.mode.samples_per_symbol();
@@ -59,6 +65,7 @@ impl Js8RxSession {
             capacity_samples,
             frame_samples,
             search_window_samples,
+            reported_results: Vec::new(),
         }
     }
 
@@ -108,7 +115,7 @@ impl Js8RxSession {
                 .copied()
                 .collect::<Vec<_>>();
             window.resize(self.search_window_samples, 0.0);
-            let audio = AudioBlock::new(SAMPLE_RATE_HZ, window)?;
+            let audio = AudioBlock::new(SAMPLE_RATE_HZ, window.clone())?;
             let mut scan_config = self.scan_config;
             scan_config.start_sample = 0;
             scan_config.max_candidates = 1;
@@ -116,6 +123,25 @@ impl Js8RxSession {
             scan_config.dedup_samples = 0;
             let mut candidate_results =
                 scan_audio_block_detailed(&audio, self.rx_config, scan_config)?;
+            let available_samples = self.search_window_samples.min(
+                self.total_samples_received
+                    .saturating_sub(self.next_candidate_sample),
+            );
+            for result in &candidate_results {
+                let offset = (result.result.event.delta_time_seconds.unwrap_or_default()
+                    * SAMPLE_RATE_HZ as f32)
+                    .round() as isize;
+                subtract_decoded_signal(&mut window, &result.result, offset, self.rx_config.mode);
+            }
+            for (sample, value) in self
+                .samples
+                .iter_mut()
+                .skip(local_start)
+                .take(available_samples)
+                .zip(window.iter())
+            {
+                *sample = *value;
+            }
             for result in &mut candidate_results {
                 result.candidate_sample = self.next_candidate_sample;
                 result.result.event.delta_time_seconds = Some(
@@ -123,12 +149,25 @@ impl Js8RxSession {
                         + result.result.event.delta_time_seconds.unwrap_or_default(),
                 );
             }
-            results.extend(candidate_results);
+            for result in candidate_results {
+                let duplicate = self.scan_config.dedup_samples > 0
+                    && self.reported_results.iter().any(|(message, sample)| {
+                        message == &result.result.frame.message
+                            && result.candidate_sample.abs_diff(*sample)
+                                <= self.scan_config.dedup_samples
+                    });
+                if !duplicate {
+                    self.reported_results
+                        .push((result.result.frame.message.clone(), result.candidate_sample));
+                    results.push(result);
+                }
+            }
             self.next_candidate_sample = self
                 .next_candidate_sample
                 .saturating_add(self.scan_config.step_samples);
             attempted += 1;
         }
+        self.prune_reported_results();
         Ok(results)
     }
 
@@ -138,6 +177,7 @@ impl Js8RxSession {
         self.buffer_start_sample = 0;
         self.total_samples_received = 0;
         self.next_candidate_sample = self.scan_config.start_sample;
+        self.reported_results.clear();
     }
 
     /// Number of samples currently retained by the bounded session.
@@ -174,6 +214,18 @@ impl Js8RxSession {
                 .next_candidate_sample
                 .saturating_add(self.scan_config.step_samples);
         }
+    }
+
+    fn prune_reported_results(&mut self) {
+        if self.scan_config.dedup_samples == 0 {
+            self.reported_results.clear();
+            return;
+        }
+        let oldest_relevant_sample = self
+            .next_candidate_sample
+            .saturating_sub(self.scan_config.dedup_samples);
+        self.reported_results
+            .retain(|(_, sample)| *sample >= oldest_relevant_sample);
     }
 }
 
@@ -225,6 +277,26 @@ mod tests {
     }
 
     #[test]
+    fn persists_signal_cancellation_across_polls() {
+        let (rx_config, scan_config) = configs();
+        let tx = encode_audio_block(
+            "0123456789AB",
+            Js8TxConfig {
+                mode: Js8Mode::Normal,
+                base_frequency_hz: 1500.0,
+                frame_type: 0,
+            },
+        )
+        .unwrap();
+        let mut session = Js8RxSession::new(rx_config, scan_config);
+        session.push_samples(&tx.samples).unwrap();
+        let before: f32 = session.samples.iter().map(|sample| sample.abs()).sum();
+        assert_eq!(session.poll(1).unwrap().len(), 1);
+        let after: f32 = session.samples.iter().map(|sample| sample.abs()).sum();
+        assert!(after < before * 0.5, "residual energy: {after} / {before}");
+    }
+
+    #[test]
     fn bounds_memory_and_skips_evicted_candidates() {
         let (rx_config, scan_config) = configs();
         let mut session = Js8RxSession::with_capacity_samples(rx_config, scan_config, 10);
@@ -246,5 +318,51 @@ mod tests {
                 qsonaut_modems::AudioError::NonFiniteSample
             ))
         ));
+    }
+
+    #[test]
+    fn suppresses_same_message_across_polls_within_dedup_distance() {
+        let (rx_config, mut scan_config) = configs();
+        scan_config.step_samples = 1;
+        scan_config.dedup_samples = 12_000;
+        let tx = encode_audio_block(
+            "0123456789AB",
+            Js8TxConfig {
+                mode: Js8Mode::Normal,
+                base_frequency_hz: 1500.0,
+                frame_type: 0,
+            },
+        )
+        .unwrap();
+        let mut session = Js8RxSession::with_capacity_samples(
+            rx_config,
+            scan_config,
+            tx.samples.len() + Js8Mode::Normal.samples_per_symbol(),
+        );
+        session.push_samples(&tx.samples).unwrap();
+        assert_eq!(session.poll(1).unwrap().len(), 1);
+        session.push_samples(&[0.0; 1]).unwrap();
+        assert!(session.poll(1).unwrap().is_empty());
+    }
+
+    #[test]
+    fn reset_allows_the_same_message_to_be_reported_again() {
+        let (rx_config, mut scan_config) = configs();
+        scan_config.dedup_samples = 12_000;
+        let tx = encode_audio_block(
+            "0123456789AB",
+            Js8TxConfig {
+                mode: Js8Mode::Normal,
+                base_frequency_hz: 1500.0,
+                frame_type: 0,
+            },
+        )
+        .unwrap();
+        let mut session = Js8RxSession::new(rx_config, scan_config);
+        session.push_samples(&tx.samples).unwrap();
+        assert_eq!(session.poll(1).unwrap().len(), 1);
+        session.reset();
+        session.push_samples(&tx.samples).unwrap();
+        assert_eq!(session.poll(1).unwrap().len(), 1);
     }
 }

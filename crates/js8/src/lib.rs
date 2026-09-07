@@ -31,7 +31,8 @@ pub use errors::Js8SynthesisError;
 pub use fec::decode_codeword;
 pub use frame::encode_tones;
 pub use messages::{
-    decode_message, encode_message, Js8Command, Js8FrameType, Js8Message, Js8MessageError,
+    decode_legacy_huffman_data, decode_message, encode_message, Js8Command, Js8FrameType,
+    Js8Message, Js8MessageError, Js8MessageReassembler,
 };
 pub use metrics::{
     demodulate_bit_llrs, demodulate_soft, estimate_snr_db, tone_metrics_to_bit_llrs, Js8BitLlrs,
@@ -42,7 +43,8 @@ pub use qsonaut_modems::AudioBlock;
 pub use receiver::Js8RxSession;
 pub use scan::{scan_audio_block, scan_audio_block_detailed, Js8ScanConfig, Js8ScanResult};
 pub use sync::{demodulate_aligned, estimate_base_frequency, find_symbol_boundary};
+pub(crate) use synth::synthesize_with_frequency_curve_phase;
 pub use synth::{
     synthesize, synthesize_with_frequency_curve, synthesize_with_frequency_drift,
-    synthesize_with_timing_drift, SAMPLE_RATE_HZ,
+    synthesize_with_timing_curve, synthesize_with_timing_drift, SAMPLE_RATE_HZ,
 };

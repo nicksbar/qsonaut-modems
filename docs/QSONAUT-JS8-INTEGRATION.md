@@ -40,6 +40,21 @@ for result in receiver.poll(2)? {
 consumer can run it on its modem worker, check cancellation between calls, and
 decide when a slot is complete or should be reset.
 
+For the primary waterfall-wide path, use `Js8RxSession::waterfall(config)` or
+`Js8ScanConfig::waterfall()` with `Js8RxSession::new`. This searches a bounded
+200–3000 Hz audio band, computes a shared FFT spectrum over the known Costas
+symbols, retains eight ranked frequency hypotheses, and extracts up to four
+signals per candidate window. The exact timing, drift, FEC, and CRC decoder is
+only run for those ranked peaks; it does not brute-force Costas correlation at
+every frequency bin. Callers can lower the bounded limits when worker CPU or
+cancellation latency is more important than recall.
+
+When `Js8ScanConfig::dedup_samples` is non-zero, the session also suppresses a
+successful message that reappears within that sample distance across separate
+`poll()` calls. This prevents overlapping rolling windows from reporting the
+same transmission repeatedly. Call `reset()` when starting a new independent
+slot or recording.
+
 ## TX path
 
 Build a validated 12 kHz mono block. The returned samples are normalized
@@ -114,8 +129,9 @@ The current RX sequence is:
 
 1. Validate 12 kHz and finite samples.
 2. Find a Costas-based frame boundary when the window is larger than one frame.
-3. Search the configured absolute audio-frequency grid.
-4. Correlate all aligned 8-FSK symbols into soft metrics.
+3. Build a shared Costas-symbol FFT spectrum and rank likely carrier peaks.
+4. Refine only those candidates, then correlate aligned 8-FSK symbols into soft
+  metrics.
 5. Convert tone metrics to bit LLRs.
 6. Run bounded `(174,87)` min-sum LDPC decoding.
 7. Reconstruct the 12-character payload, extract frame type, and validate CRC.
@@ -187,27 +203,55 @@ The scanner is deliberately not a JS8Call scheduler or 60-second detector:
 the consumer still supplies recording windows, cancellation, slot policy, and
 thread ownership. Candidate spacing is a performance/recall trade-off; a
 smaller step improves acquisition of unknown signal starts but costs more CPU.
+For waterfall-wide operation, set
+`Js8ScanConfig::waterfall_frequency_range_hz` to an absolute `(low_hz,
+high_hz)` band, then raise the bounded `max_frequency_hypotheses` and
+`max_signals_per_window` limits as needed. The scanner ranks Costas
+spectral hypotheses, decodes the strongest CRC-valid signal, and subtracts it
+before searching the residual for additional channels. Previously decoded
+carriers are excluded from later residual passes so a weak cancellation cannot
+starve the remaining channels. These limits remain consumer-visible so a
+worker can budget CPU and cancellation opportunities.
+For each candidate window, the scanner retains the configured number of
+strongest distinct Costas frequency hypotheses (three by default) and lets
+exact FEC/CRC validation reject weaker interferers that happen to produce the
+strongest coarse peak.
 
 ## Current limitations
 
-- RX is single-signal only.
-- Frequency acquisition is a bounded grid search with a quadratic track fitted
-  across the three Costas blocks. Timing-aware demodulation now performs a
-  bounded global Costas search with fractional-sample interpolation for linear
-  sample-clock drift and exposes the estimate through `Js8RxResult`; higher-
-  order clock behavior remains future work.
+- The default RX adapter remains single-signal. The recording scanner has
+  bounded waterfall-wide multi-signal extraction with shared FFT candidate
+  acquisition when configured with an absolute frequency band and larger
+  per-window limits; it is not a full JS8Call detector or scheduler.
+- Frequency acquisition ranks a bounded grid using the shared Costas-symbol
+  spectrum, followed by a quadratic track fitted
+  across the three Costas blocks. Timing-aware demodulation performs a bounded
+  global Costas search with fractional-sample interpolation for linear and
+  quadratic sample-clock drift and exposes both estimates through
+  `Js8RxResult`.
+- Timing acquisition uses a coarse Costas-symbol subset for broad candidate
+  rejection, followed by full-symbol refinement. Fractional-symbol correlation
+  reuses the constant interpolation fraction within each symbol to reduce hot
+  loop overhead without changing the final timing model.
 - Successful decode events now include a decoder-derived relative SNR estimate
   (capped at 99 dB for ideal synthetic audio); it is suitable for ranking and
   consumer quality policy, not calibrated RF measurement.
 - `Js8RxResult` also reports the fitted linear carrier drift in hertz per
   second and quadratic curvature in hertz per second squared, while
   `DecodeEvent.audio_frequency_hz` remains the frame-start carrier estimate.
+  Its `timing_drift_samples_per_second` and
+  `timing_curvature_samples_per_second2` fields report the corresponding
+  sample-clock displacement fit.
 - The decoder has verified clean-frame and single-hard-bit behavior, but is not
   yet a JS8Call-equivalent noisy-channel performance implementation.
 - Soft-bit generation now follows the JS8Call reference strategy: strongest
   tone per bit half, separate normalized amplitude and log metrics, and
   oracle-style erasure retries through the LDPC decoder. This is an isolated
   interoperability improvement, not a complete noisy-channel match.
+- Failed primary decodes receive one additional bounded retry using a
+  per-symbol lower-floor estimate for soft metrics. This preserves the normal
+  decode path while providing a fallback for locally varying interference; it
+  has not yet recovered the difficult `A_2_1.wav` oracle fixture.
 - Coarse Costas acquisition now scores known tones against the average of the
   seven rejected tones, approximating JS8Call's baseline-resistant `t/t0`
   sync ratio, aggregated per Costas block. It passes deterministic common-floor
@@ -219,9 +263,13 @@ smaller step improves acquisition of unknown signal starts but costs more CPU.
   in-band or guard-tone floor estimation alone.
 - The message layer now decodes and encodes the compact JS8Call heartbeat,
   compound, compound-directed, and directed layouts, including callsign/grid
-  metadata and the directed-command table. Legacy compressed data payloads are
-  preserved as encoded data; Huffman/JSC decompression and long-message
-  reassembly remain consumer/protocol work.
+  metadata and the directed-command table. Legacy Huffman data payloads can
+  now be decoded through `decode_legacy_huffman_data`; dense JSC compressed
+  payloads remain losslessly preserved as encoded data, and long-message
+  fragments can be joined with the bounded `Js8MessageReassembler` when the
+  consumer supplies JS8Call's explicit `First`/`Last`/`Data` transmission
+  flags. The reassembler does not infer those flags from payloads or own
+  consumer persistence.
 - The optional JS8Call media scan is a capability measurement only. The
   current bounded scan uses decimated Costas acquisition followed by exact
   timing/frequency refinement. A partial release run after baseline subtraction
@@ -230,7 +278,11 @@ smaller step improves acquisition of unknown signal starts but costs more CPU.
   `A_3_3.wav`; the complete 9-recording recall has not yet been finalized.
   This is not full noisy-channel interoperability; drift tracking,
   multi-signal subtraction, stronger FEC behavior, and the oracle's overlapping
-  spectrum pipeline remain modem work. Duplicate candidates are ranked by
+  spectrum pipeline remain modem work. The scanner now performs one bounded
+  residual-cancellation retry after a valid decode, persists that cancellation
+  across later candidate windows, and can recover a weaker overlapping
+  synthetic frame. It is not an oracle-equivalent subtraction pipeline.
+  Duplicate candidates are ranked by
   coarse sync quality and then decoder-derived SNR without changing
   chronological result ordering.
 - Corpus scans can be made much faster for smoke checks with the optional
@@ -259,13 +311,17 @@ smaller step improves acquisition of unknown signal starts but costs more CPU.
   candidate spacing or scalar Costas weighting alone.
   Baseline subtraction is the first change to materially improve recall, but
   the final corpus total remains pending.
-- Duplicate suppression, subtraction, CQ/heartbeat semantics, directed
-  commands, and application events remain consumer/message layers.
+- Duplicate suppression, CQ/heartbeat semantics, directed commands, and
+  application events remain consumer/message layers. Signal subtraction is
+  owned by the modem, but the current implementation is limited to two
+  signals per candidate window and does not claim full JS8Call parity.
 - The current public adapter is aligned to one frame/window, not a complete
   multi-signal 60-second JS8Call receiver.
 - `Js8RxSession` provides bounded chunk ingestion and candidate polling for a
-  consumer-owned worker. It is not a clock or slot scheduler; QSONaut still
-  owns capture timing, `SlotGate`, cancellation, and lifecycle decisions.
+  consumer-owned worker. Successful bounded signal cancellation is retained in
+  its rolling buffer across polls. It is not a clock or slot scheduler;
+  QSONaut still owns capture timing, `SlotGate`, cancellation, and lifecycle
+  decisions.
 
 Do not claim full JS8Call interoperability until oracle-generated audio,
 frequency/time offset sweeps, deterministic noise fixtures, and no-decode

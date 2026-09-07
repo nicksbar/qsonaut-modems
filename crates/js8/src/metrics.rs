@@ -52,12 +52,59 @@ pub(crate) fn demodulate_soft_with_frequency_curve_and_timing(
     curvature_hz_per_second2: f32,
     timing_drift_samples_per_second: f32,
 ) -> Result<Js8ToneMetrics, Js8DecodeError> {
+    demodulate_soft_with_frequency_curve_and_timing_curve(
+        samples,
+        mode,
+        base_frequency_hz,
+        drift_hz_per_second,
+        curvature_hz_per_second2,
+        timing_drift_samples_per_second,
+        0.0,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn demodulate_soft_with_frequency_curve_and_timing_curve(
+    samples: &[f32],
+    mode: Js8Mode,
+    base_frequency_hz: f32,
+    drift_hz_per_second: f32,
+    curvature_hz_per_second2: f32,
+    timing_drift_samples_per_second: f32,
+    timing_curvature_samples_per_second2: f32,
+    adaptive_baseline: bool,
+) -> Result<Js8ToneMetrics, Js8DecodeError> {
+    demodulate_soft_with_frequency_curve_and_timing_baseline(
+        samples,
+        mode,
+        base_frequency_hz,
+        drift_hz_per_second,
+        curvature_hz_per_second2,
+        timing_drift_samples_per_second,
+        timing_curvature_samples_per_second2,
+        adaptive_baseline,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn demodulate_soft_with_frequency_curve_and_timing_baseline(
+    samples: &[f32],
+    mode: Js8Mode,
+    base_frequency_hz: f32,
+    drift_hz_per_second: f32,
+    curvature_hz_per_second2: f32,
+    timing_drift_samples_per_second: f32,
+    timing_curvature_samples_per_second2: f32,
+    adaptive_baseline: bool,
+) -> Result<Js8ToneMetrics, Js8DecodeError> {
     if !base_frequency_hz.is_finite() {
         return Err(Js8DecodeError::InvalidBaseFrequency);
     }
     if !drift_hz_per_second.is_finite()
         || !curvature_hz_per_second2.is_finite()
         || !timing_drift_samples_per_second.is_finite()
+        || !timing_curvature_samples_per_second2.is_finite()
     {
         return Err(Js8DecodeError::InvalidBaseFrequency);
     }
@@ -80,6 +127,7 @@ pub(crate) fn demodulate_soft_with_frequency_curve_and_timing(
         let nominal_start = symbol_index * samples_per_symbol;
         let time = nominal_start as f32 / 12_000.0;
         let start = nominal_start as f32 + timing_drift_samples_per_second * time;
+        let start = start + timing_curvature_samples_per_second2 * time * time;
         if !start.is_finite() || start < 0.0 || start as usize + samples_per_symbol > samples.len()
         {
             return Err(Js8DecodeError::InvalidSampleCount {
@@ -126,7 +174,13 @@ pub(crate) fn demodulate_soft_with_frequency_curve_and_timing(
     }
 
     let baseline = estimate_frame_baseline(&metrics, &guard_metrics);
-    for symbol_metrics in &mut metrics {
+    for (symbol_index, symbol_metrics) in metrics.iter_mut().enumerate() {
+        let baseline = if adaptive_baseline {
+            let original_metrics = *symbol_metrics;
+            estimate_symbol_baseline(&original_metrics, &guard_metrics[symbol_index])
+        } else {
+            baseline
+        };
         let mut total_power = 0.0_f32;
         for metric in symbol_metrics.iter_mut() {
             *metric = (*metric - baseline).max(0.0);
@@ -161,6 +215,15 @@ fn estimate_frame_baseline(metrics: &Js8ToneMetrics, guards: &[[f32; 8]; SYMBOL_
     values[count / 10]
 }
 
+fn estimate_symbol_baseline(metrics: &[f32; 8], guards: &[f32; 8]) -> f32 {
+    let mut values = [0.0_f32; 16];
+    values[..8].copy_from_slice(metrics);
+    values[8..].copy_from_slice(guards);
+    values.sort_unstable_by(|left, right| left.total_cmp(right));
+    values[1]
+}
+
+#[inline]
 fn correlate_tone_at_offset(
     samples: &[f32],
     start: f32,
@@ -171,8 +234,11 @@ fn correlate_tone_at_offset(
     if !start.is_finite() || start < 0.0 {
         return None;
     }
-    let last_position = start + (samples_per_symbol.saturating_sub(1)) as f32;
-    if last_position >= samples.len() as f32 {
+    let lower_start = start.floor() as usize;
+    let fraction = start - lower_start as f32;
+    if lower_start + samples_per_symbol > samples.len()
+        || (fraction > f32::EPSILON && lower_start + samples_per_symbol >= samples.len())
+    {
         return None;
     }
     let phase_step = TAU * (base_frequency_hz / 12_000.0 + tone as f32 / samples_per_symbol as f32);
@@ -180,9 +246,7 @@ fn correlate_tone_at_offset(
     let (mut cos_phase, mut sin_phase) = (1.0_f32, 0.0_f32);
     let (mut in_phase, mut quadrature) = (0.0_f32, 0.0_f32);
     for sample_index in 0..samples_per_symbol {
-        let position = start + sample_index as f32;
-        let lower = position.floor() as usize;
-        let fraction = position - lower as f32;
+        let lower = lower_start + sample_index;
         let upper = (lower + 1).min(samples.len() - 1);
         let sample = samples[lower].mul_add(1.0 - fraction, samples[upper] * fraction);
         in_phase += sample * cos_phase;
@@ -465,5 +529,12 @@ mod tests {
             estimate_snr_db(&[0.0; 79 * 384], Js8Mode::Ultra, 1500.0).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn adaptive_baseline_uses_the_local_lower_floor() {
+        let metrics = [100.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
+        let guards = [1.0, 2.0, 3.0, 11.0, 12.0, 13.0, 14.0, 15.0];
+        assert_eq!(super::estimate_symbol_baseline(&metrics, &guards), 2.0);
     }
 }

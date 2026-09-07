@@ -98,26 +98,54 @@ pub(crate) fn decode_audio_with_frequency_curve(
     )
 }
 
-pub(crate) fn decode_audio_with_frequency_curve_and_timing(
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn decode_audio_with_frequency_curve_and_timing_curve(
     samples: &[f32],
     mode: Js8Mode,
     base_frequency_hz: f32,
     drift_hz_per_second: f32,
     curvature_hz_per_second2: f32,
     timing_drift_samples_per_second: f32,
+    timing_curvature_samples_per_second2: f32,
     max_iterations: usize,
 ) -> Result<Js8DecodedFrame, Js8DecodeError> {
-    decode_llrs(
-        &crate::metrics::demodulate_bit_llrs_with_frequency_curve_and_timing(
+    let primary_metrics = crate::metrics::demodulate_soft_with_frequency_curve_and_timing_curve(
+        samples,
+        mode,
+        base_frequency_hz,
+        drift_hz_per_second,
+        curvature_hz_per_second2,
+        timing_drift_samples_per_second,
+        timing_curvature_samples_per_second2,
+        false,
+    )?;
+    let primary_error = match decode_llrs(
+        &crate::metrics::tone_metrics_to_bit_llrs(&primary_metrics),
+        max_iterations,
+    ) {
+        Ok(frame) => return Ok(frame),
+        Err(error) => error,
+    };
+
+    let Ok(adaptive_metrics) =
+        crate::metrics::demodulate_soft_with_frequency_curve_and_timing_curve(
             samples,
             mode,
             base_frequency_hz,
             drift_hz_per_second,
             curvature_hz_per_second2,
             timing_drift_samples_per_second,
-        )?,
+            timing_curvature_samples_per_second2,
+            true,
+        )
+    else {
+        return Err(primary_error);
+    };
+    decode_llrs(
+        &crate::metrics::tone_metrics_to_bit_llrs(&adaptive_metrics),
         max_iterations,
     )
+    .map_err(|_| primary_error)
 }
 
 #[cfg(test)]

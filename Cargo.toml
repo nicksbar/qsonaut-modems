@@ -10,3 +10,4 @@ authors = ["QSONaut Contributors"]
 
 [workspace.dependencies]
 thiserror = "2"
+rustfft = "6"

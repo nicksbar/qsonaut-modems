@@ -64,6 +64,8 @@ pub struct Js8RxResult {
     pub frequency_curvature_hz_per_second2: f32,
     /// Fitted cumulative sample-clock drift in samples per second.
     pub timing_drift_samples_per_second: f32,
+    /// Fitted quadratic sample-clock drift in samples per second squared.
+    pub timing_curvature_samples_per_second2: f32,
 }
 
 #[derive(Debug, Error)]
@@ -191,20 +193,22 @@ pub fn decode_audio_block_detailed(
             expected: frame_samples,
             actual: audio.samples.len().saturating_sub(offset),
         })?;
-    let timing_drift_samples_per_second = crate::sync::estimate_timing_drift(
-        timing_window,
-        config.mode,
-        frequency,
-        drift_hz_per_second,
-        curvature_hz_per_second2,
-    )?;
-    let decoded = crate::decode::decode_audio_with_frequency_curve_and_timing(
+    let (timing_drift_samples_per_second, timing_curvature_samples_per_second2) =
+        crate::sync::estimate_timing_drift_curve(
+            timing_window,
+            config.mode,
+            frequency,
+            drift_hz_per_second,
+            curvature_hz_per_second2,
+        )?;
+    let decoded = crate::decode::decode_audio_with_frequency_curve_and_timing_curve(
         timing_window,
         config.mode,
         frequency,
         drift_hz_per_second,
         curvature_hz_per_second2,
         timing_drift_samples_per_second,
+        timing_curvature_samples_per_second2,
         config.max_fec_iterations,
     )?;
     let snr_db = crate::metrics::estimate_snr_db_with_frequency_curve(
@@ -229,6 +233,7 @@ pub fn decode_audio_block_detailed(
         frequency_drift_hz_per_second: drift_hz_per_second,
         frequency_curvature_hz_per_second2: curvature_hz_per_second2,
         timing_drift_samples_per_second,
+        timing_curvature_samples_per_second2,
     })
 }
 
@@ -354,6 +359,29 @@ mod tests {
             "estimated timing drift: {}",
             result.timing_drift_samples_per_second
         );
+    }
+
+    #[test]
+    fn rx_tracks_a_quadratic_sample_clock_drift() {
+        let mode = crate::Js8Mode::Normal;
+        let tones = crate::encode_tones("TIMECURV12AB", 4, mode).unwrap();
+        let mut samples =
+            crate::synthesize_with_timing_curve(&tones, mode, 1500.0, 0.0, 4.0).unwrap();
+        samples.resize(samples.len() + mode.samples_per_symbol() - 1, 0.0);
+        let audio = AudioBlock::new(crate::SAMPLE_RATE_HZ, samples).unwrap();
+        let result = decode_audio_block_detailed(
+            &audio,
+            Js8RxConfig {
+                mode,
+                center_frequency_hz: 1500.0,
+                frequency_half_width_hz: 15.0,
+                frequency_step_hz: 0.5,
+                max_fec_iterations: 30,
+            },
+        )
+        .unwrap();
+        assert_eq!(result.frame.message, "TIMECURV12AB");
+        assert!(result.timing_curvature_samples_per_second2.is_finite());
     }
 
     #[test]

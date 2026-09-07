@@ -1,5 +1,7 @@
 use std::f32::consts::TAU;
 
+use rustfft::{num_complex::Complex32, FftPlanner};
+
 use crate::{costas::COSTAS_SYMBOLS, errors::Js8DecodeError, frame::SYMBOL_COUNT, Js8Mode};
 
 use super::synth::SAMPLE_RATE_HZ;
@@ -128,17 +130,31 @@ pub(crate) fn find_symbol_boundary_with_quality(
     Ok((best_offset, quality))
 }
 
-/// Lower-cost acquisition search used by recording scans. It deliberately
-/// trades a few samples of timing resolution and correlation density for a
-/// much smaller candidate-search cost; the exact decoder refines both later.
-pub(crate) fn find_coarse_boundary_with_quality(
+/// Rank carrier bases across a wide band using one FFT per known Costas
+/// symbol. This is the waterfall acquisition path: it avoids recomputing a
+/// time-domain correlation for every frequency candidate and leaves exact
+/// timing/frequency refinement to the normal decoder.
+pub(crate) fn find_waterfall_frequency_hypotheses(
     samples: &[f32],
     mode: Js8Mode,
-    base_frequency_hz: f32,
-) -> Result<(usize, f32), Js8DecodeError> {
-    if !base_frequency_hz.is_finite() {
-        return Err(Js8DecodeError::InvalidBaseFrequency);
+    lower_frequency_hz: f32,
+    upper_frequency_hz: f32,
+    step_hz: f32,
+    max_hypotheses: usize,
+) -> Result<Vec<(f32, f32)>, Js8DecodeError> {
+    if !lower_frequency_hz.is_finite()
+        || !upper_frequency_hz.is_finite()
+        || lower_frequency_hz >= upper_frequency_hz
+    {
+        return Err(Js8DecodeError::InvalidFrequencySearchRange);
     }
+    if !step_hz.is_finite() || step_hz <= 0.0 {
+        return Err(Js8DecodeError::InvalidFrequencySearchStep);
+    }
+    if max_hypotheses == 0 {
+        return Ok(Vec::new());
+    }
+
     let samples_per_symbol = mode.samples_per_symbol();
     let expected_samples = SYMBOL_COUNT * samples_per_symbol;
     let minimum_samples = expected_samples + samples_per_symbol - 1;
@@ -152,49 +168,98 @@ pub(crate) fn find_coarse_boundary_with_quality(
         return Err(Js8DecodeError::NonFiniteSample);
     }
 
-    // Keep the decimated Nyquist limit above the supported JS8 carrier
-    // search range. A larger stride aliases the absolute carrier and can
-    // select a convincing but incorrect Costas peak.
-    const STRIDE: usize = 2;
-    const OFFSET_STEP: usize = 2;
-    let mut best_offset = 0;
-    let mut best_score = f32::NEG_INFINITY;
-    for offset in (0..samples_per_symbol).step_by(OFFSET_STEP) {
-        let mut score = 0.0_f32;
-        for (block, sequence) in mode.costas().iter().enumerate() {
-            let symbol_start = offset + block * (COSTAS_SYMBOLS + 29) * samples_per_symbol;
-            let mut target_power = 0.0_f32;
-            let mut total_power = 0.0_f32;
-            for (symbol, &tone) in sequence.iter().enumerate() {
-                let start = symbol_start + symbol * samples_per_symbol;
-                let symbol_samples = &samples[start..start + samples_per_symbol];
-                target_power += correlate_tone_stride(
-                    symbol_samples,
-                    tone,
-                    samples_per_symbol,
-                    base_frequency_hz,
-                    STRIDE,
-                );
-                total_power += tone_power_sum_stride(
-                    symbol_samples,
-                    samples_per_symbol,
-                    base_frequency_hz,
-                    STRIDE,
-                );
+    let fft_len = (samples_per_symbol * 4).next_power_of_two();
+    let fft = FftPlanner::<f32>::new().plan_fft_forward(fft_len);
+    let mut spectra: Vec<Vec<f32>> = Vec::with_capacity(mode.costas().len() * COSTAS_SYMBOLS);
+    let window_scale = std::f32::consts::TAU / samples_per_symbol as f32;
+    let window: Vec<f32> = (0..samples_per_symbol)
+        .map(|index| 0.5 - 0.5 * (window_scale * index as f32).cos())
+        .collect();
+    let mut input = vec![Complex32::new(0.0, 0.0); fft_len];
+    for (block, sequence) in mode.costas().iter().enumerate() {
+        let symbol_block_start = block * (COSTAS_SYMBOLS + 29) * samples_per_symbol;
+        for symbol in 0..sequence.len() {
+            let start = symbol_block_start + symbol * samples_per_symbol;
+            input.fill(Complex32::new(0.0, 0.0));
+            for (index, sample) in samples[start..start + samples_per_symbol]
+                .iter()
+                .copied()
+                .enumerate()
+            {
+                input[index].re = sample * window[index];
             }
-            score += target_power / ((total_power - target_power) / 6.0).max(f32::MIN_POSITIVE);
-        }
-        if score > best_score {
-            best_score = score;
-            best_offset = offset;
+            fft.process(&mut input);
+            spectra.push(
+                input[..fft_len / 2]
+                    .iter()
+                    .map(Complex32::norm_sqr)
+                    .collect(),
+            );
         }
     }
-    let quality = if best_score.is_finite() && best_score > 0.0 {
-        best_score / (best_score + (mode.costas().len() * COSTAS_SYMBOLS) as f32)
+
+    let candidate_count = ((upper_frequency_hz - lower_frequency_hz) / step_hz).floor() as usize;
+    let mut hypotheses = Vec::with_capacity(max_hypotheses);
+    for candidate_index in 0..=candidate_count {
+        let frequency = lower_frequency_hz + candidate_index as f32 * step_hz;
+        let mut target_power = 0.0_f32;
+        let mut rejected_power = 0.0_f32;
+        for (spectrum, tone) in spectra.iter().zip(
+            mode.costas()
+                .iter()
+                .flat_map(|sequence| sequence.iter())
+                .copied(),
+        ) {
+            let target_frequency =
+                frequency + f32::from(tone) * SAMPLE_RATE_HZ as f32 / samples_per_symbol as f32;
+            let target_bin = (target_frequency * fft_len as f32 / SAMPLE_RATE_HZ as f32).round();
+            let target_bin = usize::try_from(target_bin as i64).unwrap_or(fft_len);
+            if target_bin >= spectrum.len() {
+                continue;
+            }
+            target_power += spectrum[target_bin];
+            for rejected_tone in 0_u8..8 {
+                if rejected_tone != tone {
+                    let rejected_frequency = frequency
+                        + f32::from(rejected_tone) * SAMPLE_RATE_HZ as f32
+                            / samples_per_symbol as f32;
+                    let rejected_bin =
+                        (rejected_frequency * fft_len as f32 / SAMPLE_RATE_HZ as f32).round();
+                    let rejected_bin = usize::try_from(rejected_bin as i64).unwrap_or(fft_len);
+                    if rejected_bin < spectrum.len() {
+                        rejected_power += spectrum[rejected_bin];
+                    }
+                }
+            }
+        }
+        let rejected_average = rejected_power / (spectra.len() as f32 * 7.0).max(1.0);
+        let target_average = target_power / spectra.len() as f32;
+        let quality = if target_average + rejected_average > 0.0 {
+            ((target_average - rejected_average) / (target_average + rejected_average)).max(0.0)
+        } else {
+            0.0
+        };
+        retain_frequency_hypothesis(&mut hypotheses, quality, frequency, max_hypotheses);
+    }
+    Ok(hypotheses)
+}
+
+fn retain_frequency_hypothesis(
+    hypotheses: &mut Vec<(f32, f32)>,
+    quality: f32,
+    frequency: f32,
+    max_hypotheses: usize,
+) {
+    if let Some(existing) = hypotheses
+        .iter_mut()
+        .find(|(_, candidate)| *candidate == frequency)
+    {
+        existing.0 = existing.0.max(quality);
     } else {
-        0.0
-    };
-    Ok((best_offset, quality))
+        hypotheses.push((quality, frequency));
+    }
+    hypotheses.sort_unstable_by(|left, right| right.0.total_cmp(&left.0));
+    hypotheses.truncate(max_hypotheses);
 }
 
 /// Estimate the absolute audio frequency of an aligned JS8 frame.
@@ -313,15 +378,13 @@ pub(crate) fn estimate_frequency_track(
     Ok((start_frequency, start_slope, curvature))
 }
 
-/// Estimate cumulative symbol-boundary movement from the three Costas blocks.
-/// The returned rate is in samples per second relative to the nominal clock.
-pub(crate) fn estimate_timing_drift(
+pub(crate) fn estimate_timing_drift_curve(
     samples: &[f32],
     mode: Js8Mode,
     base_frequency_hz: f32,
     drift_hz_per_second: f32,
     curvature_hz_per_second2: f32,
-) -> Result<f32, Js8DecodeError> {
+) -> Result<(f32, f32), Js8DecodeError> {
     if !base_frequency_hz.is_finite()
         || !drift_hz_per_second.is_finite()
         || !curvature_hz_per_second2.is_finite()
@@ -340,20 +403,17 @@ pub(crate) fn estimate_timing_drift(
         return Err(Js8DecodeError::NonFiniteSample);
     }
 
-    const MAX_DRIFT: i32 = 64;
-    const DRIFT_STEP: f32 = 0.25;
-    let mut best_rate = 0.0_f32;
-    let mut best_score = f32::NEG_INFINITY;
-    for rate_index in -(MAX_DRIFT * 4)..=(MAX_DRIFT * 4) {
-        let rate = rate_index as f32 * DRIFT_STEP;
-        let mut score = 0.0_f32;
-        let mut valid = true;
+    const COARSE_SYMBOLS: [usize; 3] = [0, 3, 6];
+    const FULL_SYMBOLS: [usize; COSTAS_SYMBOLS] = [0, 1, 2, 3, 4, 5, 6];
+    let score = |rate: f32, timing_curvature: f32, symbols: &[usize]| {
+        let mut total = 0.0_f32;
         for (block, sequence) in mode.costas().iter().enumerate() {
             let block_start = block * (COSTAS_SYMBOLS + 29) * samples_per_symbol;
-            for (symbol, &tone) in sequence.iter().enumerate() {
+            for &symbol in symbols {
+                let tone = sequence[symbol];
                 let nominal_start = block_start + symbol * samples_per_symbol;
                 let time = nominal_start as f32 / SAMPLE_RATE_HZ as f32;
-                let start = nominal_start as f32 + rate * time;
+                let start = nominal_start as f32 + rate * time + timing_curvature * time * time;
                 let Some(tone_score) = correlate_tone_at(
                     samples,
                     start,
@@ -363,21 +423,54 @@ pub(crate) fn estimate_timing_drift(
                         + drift_hz_per_second * time
                         + curvature_hz_per_second2 * time * time,
                 ) else {
-                    valid = false;
-                    break;
+                    return f32::NEG_INFINITY;
                 };
-                score += tone_score;
-            }
-            if !valid {
-                break;
+                total += tone_score;
             }
         }
-        if valid && score > best_score {
-            best_score = score;
+        total
+    };
+
+    let mut best_rate = 0.0_f32;
+    let mut best_curvature = 0.0_f32;
+    let mut best_score = f32::NEG_INFINITY;
+    for rate_index in -256..=256 {
+        let rate = rate_index as f32 * 0.25;
+        let candidate_score = score(rate, 0.0, &COARSE_SYMBOLS);
+        if candidate_score > best_score {
+            best_score = candidate_score;
             best_rate = rate;
         }
     }
-    Ok(best_rate)
+    let coarse_rate = best_rate;
+    for rate_index in -8..=8 {
+        let rate = coarse_rate + rate_index as f32;
+        for curvature_index in -8..=8 {
+            let timing_curvature = curvature_index as f32 * 0.5;
+            let candidate_score = score(rate, timing_curvature, &COARSE_SYMBOLS);
+            if candidate_score > best_score {
+                best_score = candidate_score;
+                best_rate = rate;
+                best_curvature = timing_curvature;
+            }
+        }
+    }
+    let coarse_rate = best_rate;
+    let coarse_curvature = best_curvature;
+    best_score = f32::NEG_INFINITY;
+    for rate_index in -8..=8 {
+        let rate = coarse_rate + rate_index as f32 * 0.25;
+        for curvature_index in -4..=4 {
+            let timing_curvature = coarse_curvature + curvature_index as f32 * 0.25;
+            let candidate_score = score(rate, timing_curvature, &FULL_SYMBOLS);
+            if candidate_score > best_score {
+                best_score = candidate_score;
+                best_rate = rate;
+                best_curvature = timing_curvature;
+            }
+        }
+    }
+    Ok((best_rate, best_curvature))
 }
 
 fn estimate_block_frequency(
@@ -430,6 +523,7 @@ fn costas_score(samples: &[f32], mode: Js8Mode, base_frequency_hz: f32) -> f32 {
     score
 }
 
+#[inline]
 pub(crate) fn correlate_tone(
     samples: &[f32],
     tone: u8,
@@ -444,6 +538,7 @@ pub(crate) fn correlate_tone(
     )
 }
 
+#[inline]
 pub(crate) fn correlate_tone_offset(
     samples: &[f32],
     tone: i32,
@@ -467,6 +562,7 @@ pub(crate) fn correlate_tone_offset(
 
 /// Correlate a tone against a symbol beginning at a fractional sample.
 /// Linear interpolation keeps timing-rate acquisition smooth below one sample.
+#[inline]
 pub(crate) fn correlate_tone_at(
     samples: &[f32],
     start: f32,
@@ -477,8 +573,11 @@ pub(crate) fn correlate_tone_at(
     if !start.is_finite() || start < 0.0 {
         return None;
     }
-    let last_position = start + (samples_per_symbol.saturating_sub(1)) as f32;
-    if last_position >= samples.len() as f32 {
+    let lower_start = start.floor() as usize;
+    let fraction = start - lower_start as f32;
+    if lower_start + samples_per_symbol > samples.len()
+        || (fraction > f32::EPSILON && lower_start + samples_per_symbol >= samples.len())
+    {
         return None;
     }
     let phase_step = TAU
@@ -487,9 +586,7 @@ pub(crate) fn correlate_tone_at(
     let (mut cos_phase, mut sin_phase) = (1.0_f32, 0.0_f32);
     let (mut in_phase, mut quadrature) = (0.0_f32, 0.0_f32);
     for sample_index in 0..samples_per_symbol {
-        let position = start + sample_index as f32;
-        let lower = position.floor() as usize;
-        let fraction = position - lower as f32;
+        let lower = lower_start + sample_index;
         let upper = (lower + 1).min(samples.len() - 1);
         let sample = samples[lower].mul_add(1.0 - fraction, samples[upper] * fraction);
         in_phase += sample * cos_phase;
@@ -501,6 +598,7 @@ pub(crate) fn correlate_tone_at(
     Some(in_phase.mul_add(in_phase, quadrature * quadrature))
 }
 
+#[cfg(test)]
 fn correlate_tone_stride(
     samples: &[f32],
     tone: u8,
@@ -509,8 +607,8 @@ fn correlate_tone_stride(
     stride: usize,
 ) -> f32 {
     let phase_step = TAU
-        * (base_frequency_hz / SAMPLE_RATE_HZ as f32 + f32::from(tone) / samples_per_symbol as f32);
-    let phase_step = phase_step * stride as f32;
+        * (base_frequency_hz / SAMPLE_RATE_HZ as f32 + f32::from(tone) / samples_per_symbol as f32)
+        * stride as f32;
     let (sin_step, cos_step) = phase_step.sin_cos();
     let (mut cos_phase, mut sin_phase) = (1.0_f32, 0.0_f32);
     let (mut in_phase, mut quadrature) = (0.0_f32, 0.0_f32);
@@ -522,25 +620,6 @@ fn correlate_tone_stride(
         cos_phase = next_cos;
     }
     in_phase.mul_add(in_phase, quadrature * quadrature)
-}
-
-fn tone_power_sum_stride(
-    samples: &[f32],
-    samples_per_symbol: usize,
-    base_frequency_hz: f32,
-    stride: usize,
-) -> f32 {
-    (0_u8..8)
-        .map(|candidate| {
-            correlate_tone_stride(
-                samples,
-                candidate,
-                samples_per_symbol,
-                base_frequency_hz,
-                stride,
-            )
-        })
-        .sum()
 }
 
 #[cfg(test)]

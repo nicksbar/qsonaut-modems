@@ -52,6 +52,24 @@ pub enum Js8MessageError {
     InvalidCommandNumber,
     #[error("JS8 encoded payload must contain exactly 12 characters")]
     InvalidPayload,
+    #[error("JS8 data payload does not contain a legacy data-frame header")]
+    InvalidDataHeader,
+    #[error("JS8 data payload contains an invalid Huffman bit sequence")]
+    InvalidHuffmanData,
+    #[error("JS8 transmission flags contain unsupported bits: 0x{flags:02x}")]
+    InvalidTransmissionFlags { flags: u8 },
+    #[error("JS8 message exceeds the reassembler limit")]
+    MessageTooLong,
+}
+
+/// JS8Call message-layer transmission flags.
+pub mod transmission_flags {
+    /// The frame starts a new multi-frame message.
+    pub const FIRST: u8 = 0x01;
+    /// The frame ends a multi-frame message.
+    pub const LAST: u8 = 0x02;
+    /// The frame uses the data-frame transmission path.
+    pub const DATA: u8 = 0x04;
 }
 
 /// Message-level interpretation of a decoded physical JS8 frame.
@@ -84,6 +102,90 @@ pub enum Js8Message {
     },
 }
 
+/// Bounded reassembly for JS8Call message-layer fragments.
+///
+/// The caller supplies the transmission flags because they are message-layer
+/// metadata, not part of the twelve-character JS8 payload. A new `FIRST`
+/// fragment discards any incomplete message. Fragments are returned only when
+/// `LAST` is received, and the buffer is reset after completion or overflow.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Js8MessageReassembler {
+    fragments: Vec<String>,
+    current_length: usize,
+    max_fragments: usize,
+    max_chars: usize,
+}
+
+impl Js8MessageReassembler {
+    /// Construct a reassembler with explicit bounded storage limits.
+    pub fn new(max_fragments: usize, max_chars: usize) -> Self {
+        Self {
+            fragments: Vec::new(),
+            current_length: 0,
+            max_fragments,
+            max_chars,
+        }
+    }
+
+    /// Construct conservative defaults suitable for a live receive worker.
+    pub fn default_limits() -> Self {
+        Self::new(64, 4096)
+    }
+
+    /// Add one decoded text fragment and return a complete message, if ready.
+    pub fn push(
+        &mut self,
+        flags: u8,
+        fragment: impl Into<String>,
+    ) -> Result<Option<String>, Js8MessageError> {
+        if flags
+            & !(transmission_flags::FIRST | transmission_flags::LAST | transmission_flags::DATA)
+            != 0
+        {
+            return Err(Js8MessageError::InvalidTransmissionFlags { flags });
+        }
+
+        let fragment = fragment.into();
+        let starts = flags & transmission_flags::FIRST != 0;
+        let ends = flags & transmission_flags::LAST != 0;
+        if starts {
+            self.reset();
+        }
+
+        if self.fragments.len() == self.max_fragments
+            || self.current_length.saturating_add(fragment.chars().count()) > self.max_chars
+        {
+            self.reset();
+            return Err(Js8MessageError::MessageTooLong);
+        }
+        if !starts && self.fragments.is_empty() {
+            return Ok(None);
+        }
+
+        self.current_length += fragment.chars().count();
+        self.fragments.push(fragment);
+        if !ends {
+            return Ok(None);
+        }
+
+        let message = self.fragments.join("");
+        self.reset();
+        Ok(Some(message))
+    }
+
+    /// Discard an incomplete message.
+    pub fn reset(&mut self) {
+        self.fragments.clear();
+        self.current_length = 0;
+    }
+}
+
+impl Default for Js8MessageReassembler {
+    fn default() -> Self {
+        Self::default_limits()
+    }
+}
+
 /// Interpret the payload and frame type returned by the physical decoder.
 ///
 /// The physical decoder always validates the CRC before this function is
@@ -108,6 +210,100 @@ pub fn decode_message(frame: &Js8DecodedFrame) -> Js8Message {
             payload: frame.message.clone(),
         },
     }
+}
+
+/// Decode a legacy JS8 data payload that uses the oracle Huffman table.
+///
+/// This accepts the 72-bit payload format used by the legacy data-frame
+/// helpers: a data flag, a zero Huffman/compressed selector, Huffman bits, and
+/// a zero-then-one padding sentinel. Dense JSC payloads remain intentionally
+/// opaque until their generated dictionary is integrated.
+pub fn decode_legacy_huffman_data(payload: &str) -> Result<String, Js8MessageError> {
+    validate_payload(payload)?;
+    let bits = payload_bits(payload);
+    if bits[0] != 1 || bits[1] != 0 {
+        return Err(Js8MessageError::InvalidDataHeader);
+    }
+    let sentinel = bits[2..]
+        .iter()
+        .rposition(|&bit| bit == 0)
+        .ok_or(Js8MessageError::InvalidHuffmanData)?
+        + 2;
+    if sentinel == 2 {
+        return Err(Js8MessageError::InvalidHuffmanData);
+    }
+    let data = &bits[2..sentinel];
+    let mut output = String::new();
+    let mut start = 0;
+    while start < data.len() {
+        let mut matched = None;
+        for end in start + 1..=data.len() {
+            let code = data[start..end]
+                .iter()
+                .map(|&bit| if bit == 0 { '0' } else { '1' })
+                .collect::<String>();
+            if let Some(character) = legacy_huffman_character(&code) {
+                matched = Some((end, character));
+                break;
+            }
+        }
+        let Some((end, character)) = matched else {
+            return Err(Js8MessageError::InvalidHuffmanData);
+        };
+        output.push(character);
+        start = end;
+    }
+    Ok(output)
+}
+
+fn legacy_huffman_character(code: &str) -> Option<char> {
+    Some(match code {
+        "01" => ' ',
+        "100" => 'E',
+        "1101" => 'T',
+        "0011" => 'A',
+        "11111" => 'O',
+        "11100" => 'I',
+        "10111" => 'N',
+        "10100" => 'S',
+        "00011" => 'H',
+        "00000" => 'R',
+        "111011" => 'D',
+        "110011" => 'L',
+        "110001" => 'C',
+        "101101" => 'U',
+        "101011" => 'M',
+        "001011" => 'W',
+        "001001" => 'F',
+        "000101" => 'G',
+        "000011" => 'Y',
+        "1111011" => 'P',
+        "1111001" => 'B',
+        "1110100" => '.',
+        "1100101" => 'V',
+        "1100100" => 'K',
+        "1100001" => '-',
+        "1100000" => '+',
+        "1011001" => '?',
+        "1011000" => '!',
+        "1010101" => '"',
+        "1010100" => 'X',
+        "0010101" => '0',
+        "0010100" => 'J',
+        "0010001" => '1',
+        "0010000" => 'Q',
+        "0001001" => '2',
+        "0001000" => 'Z',
+        "0000101" => '3',
+        "0000100" => '5',
+        "11110101" => '4',
+        "11110100" => '9',
+        "11110001" => '8',
+        "11110000" => '6',
+        "11101011" => '7',
+        "11101010" => '/',
+        _ => return None,
+    })
 }
 
 /// Encode a semantic message into the twelve-character JS8 payload and frame
@@ -536,7 +732,10 @@ fn command_name(code: u8) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_message, encode_message, Js8Command, Js8FrameType, Js8Message};
+    use super::{
+        decode_legacy_huffman_data, decode_message, encode_message, pack_bits, transmission_flags,
+        Js8Command, Js8FrameType, Js8Message, Js8MessageError, Js8MessageReassembler,
+    };
     use crate::Js8DecodedFrame;
 
     #[test]
@@ -609,5 +808,80 @@ mod tests {
             });
             assert_eq!(decoded, message);
         }
+    }
+
+    #[test]
+    fn decodes_legacy_huffman_data_payloads() {
+        let codes = [
+            "1101", "100", "10100", "1101", "01", "0010001", "0001001", "0000101",
+        ];
+        let mut bits = vec![1, 0];
+        for code in codes {
+            bits.extend(code.bytes().map(|bit| u8::from(bit == b'1')));
+        }
+        bits.push(0);
+        bits.resize(72, 1);
+        let payload = pack_bits(
+            bits.iter()
+                .enumerate()
+                .fold(0_u128, |value, (index, &bit)| {
+                    value | (u128::from(bit) << (71 - index))
+                }),
+        );
+        assert_eq!(decode_legacy_huffman_data(&payload).unwrap(), "TEST 123");
+        assert_eq!(
+            decode_legacy_huffman_data(&"0".repeat(12)),
+            Err(Js8MessageError::InvalidDataHeader)
+        );
+    }
+
+    #[test]
+    fn reassembles_bounded_first_and_last_fragments() {
+        let mut reassembler = Js8MessageReassembler::new(3, 32);
+        assert_eq!(
+            reassembler
+                .push(
+                    transmission_flags::FIRST | transmission_flags::DATA,
+                    "HELLO ",
+                )
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            reassembler.push(transmission_flags::LAST, "WORLD").unwrap(),
+            Some("HELLO WORLD".to_owned())
+        );
+    }
+
+    #[test]
+    fn first_fragment_restarts_an_incomplete_message() {
+        let mut reassembler = Js8MessageReassembler::new(3, 32);
+        reassembler
+            .push(transmission_flags::FIRST, "STALE")
+            .unwrap();
+        reassembler
+            .push(transmission_flags::FIRST, "FRESH")
+            .unwrap();
+        assert_eq!(
+            reassembler.push(transmission_flags::LAST, " DATA").unwrap(),
+            Some("FRESH DATA".to_owned())
+        );
+    }
+
+    #[test]
+    fn reassembler_rejects_invalid_flags_and_overflow() {
+        let mut reassembler = Js8MessageReassembler::new(1, 4);
+        assert_eq!(
+            reassembler.push(0x80, "TEXT"),
+            Err(Js8MessageError::InvalidTransmissionFlags { flags: 0x80 })
+        );
+        assert_eq!(
+            reassembler.push(transmission_flags::FIRST, "TOO LONG"),
+            Err(Js8MessageError::MessageTooLong)
+        );
+        assert_eq!(
+            reassembler.push(transmission_flags::LAST, "").unwrap(),
+            None
+        );
     }
 }

@@ -10,3 +10,4 @@ repository = "https://github.com/nicksbar/qsonaut-modems"
 [dependencies]
 qsonaut-modems = { package = "qsonaut-modems", path = "../qsonaut-modems" }
 thiserror.workspace = true
+rustfft.workspace = true

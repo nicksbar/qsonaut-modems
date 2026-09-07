@@ -41,16 +41,70 @@ pub fn synthesize_with_timing_drift(
     if !timing_drift_samples_per_second.is_finite() {
         return Err(Js8SynthesisError::InvalidTimingDrift);
     }
-    let clock_scale = 1.0 + timing_drift_samples_per_second / SAMPLE_RATE_HZ as f32;
-    if clock_scale <= 0.0 {
+    let source = synthesize(tones, mode, base_frequency_hz)?;
+    synthesize_with_timing_curve_from_source(&source, timing_drift_samples_per_second, 0.0)
+}
+
+/// Synthesize a frame whose sample clock has linear and quadratic drift terms.
+/// Drift is expressed as cumulative sample displacement relative to the
+/// nominal clock: `linear * t + quadratic * t²`.
+pub fn synthesize_with_timing_curve(
+    tones: &[u8; SYMBOL_COUNT],
+    mode: Js8Mode,
+    base_frequency_hz: f32,
+    timing_drift_samples_per_second: f32,
+    timing_curvature_samples_per_second2: f32,
+) -> Result<Vec<f32>, Js8SynthesisError> {
+    if !timing_drift_samples_per_second.is_finite()
+        || !timing_curvature_samples_per_second2.is_finite()
+    {
         return Err(Js8SynthesisError::InvalidTimingDrift);
     }
     let source = synthesize(tones, mode, base_frequency_hz)?;
-    let output_len = (source.len() as f32 * clock_scale).ceil() as usize;
+    synthesize_with_timing_curve_from_source(
+        &source,
+        timing_drift_samples_per_second,
+        timing_curvature_samples_per_second2,
+    )
+}
+
+fn synthesize_with_timing_curve_from_source(
+    source: &[f32],
+    timing_drift_samples_per_second: f32,
+    timing_curvature_samples_per_second2: f32,
+) -> Result<Vec<f32>, Js8SynthesisError> {
+    let duration_s = source.len() as f32 / SAMPLE_RATE_HZ as f32;
+    let end_scale = 1.0
+        + timing_drift_samples_per_second / SAMPLE_RATE_HZ as f32
+        + 2.0 * timing_curvature_samples_per_second2 * duration_s / SAMPLE_RATE_HZ as f32;
+    if end_scale <= 0.0 {
+        return Err(Js8SynthesisError::InvalidTimingDrift);
+    }
+    let end_offset = timing_drift_samples_per_second * duration_s
+        + timing_curvature_samples_per_second2 * duration_s * duration_s;
+    let output_len = (source.len() as f32 + end_offset).ceil().max(1.0) as usize;
     let mut output = Vec::with_capacity(output_len);
     for output_index in 0..output_len {
-        let source_position = output_index as f32 / clock_scale;
+        let output_position = output_index as f32;
+        let mut source_position = output_position;
+        for _ in 0..4 {
+            let time = source_position / SAMPLE_RATE_HZ as f32;
+            let offset = timing_drift_samples_per_second * time
+                + timing_curvature_samples_per_second2 * time * time;
+            let derivative = 1.0
+                + timing_drift_samples_per_second / SAMPLE_RATE_HZ as f32
+                + 2.0 * timing_curvature_samples_per_second2 * time / SAMPLE_RATE_HZ as f32;
+            source_position -= (source_position + offset - output_position) / derivative;
+        }
+        if source_position < 0.0 {
+            output.push(source[0]);
+            continue;
+        }
         let lower = source_position.floor() as usize;
+        if lower >= source.len() - 1 {
+            output.push(*source.last().unwrap_or(&0.0));
+            continue;
+        }
         let upper = (lower + 1).min(source.len() - 1);
         let fraction = source_position - lower as f32;
         output.push(source[lower].mul_add(1.0 - fraction, source[upper] * fraction));
@@ -73,6 +127,27 @@ pub fn synthesize_with_frequency_curve(
         return Err(Js8SynthesisError::InvalidBaseFrequency);
     }
 
+    synthesize_with_frequency_curve_phase(
+        tones,
+        mode,
+        base_frequency_hz,
+        drift_hz_per_second,
+        curvature_hz_per_second2,
+        0.0,
+    )
+}
+
+pub(crate) fn synthesize_with_frequency_curve_phase(
+    tones: &[u8; SYMBOL_COUNT],
+    mode: Js8Mode,
+    base_frequency_hz: f32,
+    drift_hz_per_second: f32,
+    curvature_hz_per_second2: f32,
+    initial_phase: f32,
+) -> Result<Vec<f32>, Js8SynthesisError> {
+    if !initial_phase.is_finite() {
+        return Err(Js8SynthesisError::InvalidBaseFrequency);
+    }
     for (index, &tone) in tones.iter().enumerate() {
         if tone > 7 {
             return Err(Js8SynthesisError::InvalidTone { index, tone });
@@ -81,7 +156,7 @@ pub fn synthesize_with_frequency_curve(
 
     let samples_per_symbol = mode.samples_per_symbol();
     let phase_step_base = TAU * base_frequency_hz / SAMPLE_RATE_HZ as f32;
-    let mut phase = 0.0_f32;
+    let mut phase = initial_phase;
     let mut samples = Vec::with_capacity(SYMBOL_COUNT * samples_per_symbol);
 
     for (symbol_index, &tone) in tones.iter().enumerate() {
@@ -104,7 +179,7 @@ pub fn synthesize_with_frequency_curve(
 mod tests {
     use super::{
         synthesize, synthesize_with_frequency_curve, synthesize_with_frequency_drift,
-        synthesize_with_timing_drift, SAMPLE_RATE_HZ,
+        synthesize_with_timing_curve, synthesize_with_timing_drift, SAMPLE_RATE_HZ,
     };
     use crate::{Js8Mode, Js8SynthesisError};
 
@@ -163,6 +238,10 @@ mod tests {
         );
         assert_eq!(
             synthesize_with_timing_drift(&[0_u8; 79], Js8Mode::Fast, 1500.0, f32::NAN),
+            Err(Js8SynthesisError::InvalidTimingDrift)
+        );
+        assert_eq!(
+            synthesize_with_timing_curve(&[0_u8; 79], Js8Mode::Fast, 1500.0, 0.0, f32::NAN),
             Err(Js8SynthesisError::InvalidTimingDrift)
         );
     }

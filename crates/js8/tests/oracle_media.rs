@@ -4,7 +4,8 @@
 //! qsonaut-js8 --test oracle_media -- --nocapture`. For faster targeted scans,
 //! also set `JS8CALL_SCAN_STEP`, `JS8CALL_SCAN_MAX_CANDIDATES`,
 //! `JS8CALL_SCAN_FREQUENCY_HALF_WIDTH`, `JS8CALL_SCAN_FREQUENCY_STEP`,
-//! `JS8CALL_SCAN_START_SECONDS`, and `JS8CALL_SCAN_DURATION_SECONDS`.
+//! `JS8CALL_MINIMUM_SYNC_QUALITY`, `JS8CALL_SCAN_START_SECONDS`, and
+//! `JS8CALL_SCAN_DURATION_SECONDS`.
 //! The corpus is intentionally
 //! not vendored: it belongs to the JS8Call oracle checkout and contains full
 //! recordings, while this crate's public adapter currently consumes one frame.
@@ -48,6 +49,11 @@ fn js8call_recordings_scan_without_crashing() {
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(25.0);
+    let minimum_sync_quality = env::var("JS8CALL_MINIMUM_SYNC_QUALITY")
+        .ok()
+        .and_then(|value| value.parse::<f32>().ok())
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .unwrap_or(0.01);
     let scan_start_seconds = env::var("JS8CALL_SCAN_START_SECONDS")
         .ok()
         .and_then(|value| value.parse::<f32>().ok())
@@ -101,6 +107,7 @@ fn js8call_recordings_scan_without_crashing() {
                 step_samples: scan_step_samples,
                 max_candidates: scan_max_candidates,
                 dedup_samples: frame_samples,
+                minimum_sync_quality,
                 sync_frequency_half_width_hz: scan_frequency_half_width,
                 sync_frequency_step_hz: scan_frequency_step,
                 ..Js8ScanConfig::default()
