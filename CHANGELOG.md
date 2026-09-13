@@ -17,6 +17,26 @@ All notable changes to `qsonaut-modems` are documented here.
 - Added cross-poll duplicate suppression to `Js8RxSession` for overlapping
   rolling candidate windows, with reset-scoped result history.
 - Added JS8 TX/RX support for Normal, Fast, Turbo, Slow, and Ultra modes.
+- Added current JS8Call operator metadata for all five enabled speeds,
+  including JS8 40/JS8 60 display names, slot periods, start delays,
+  bandwidths, decoder thresholds, and heartbeat-network eligibility.
+- Added batch and chunk-fed multi-speed receive APIs. Each selected speed keeps
+  its own bounded streaming session so short modes can report without waiting
+  for a complete Slow-mode window.
+- Added directed-message packing and unpacking for the mentor's complete
+  reserved-call/group map, including `@ALLCALL`, `@HB`, and activity groups.
+- Aligned compact directed callsign packing with the mentor's six-position
+  shape, portable suffix, and 3DA0/3X aliases; malformed shapes now return an
+  error instead of reaching invalid arithmetic.
+- Added public directed-command capability metadata for all 32 wire codes,
+  including mentor autoreply, buffered-payload, checksum, and SNR sets without
+  assigning transmission or persistence policy to the modem.
+- Added current-mentor tone vectors generated directly from JS8Call Improved
+  revision `e8a6121d859ba3b678b3485e7a14ed07df1bbee4` and verified them across
+  all five enabled modes.
+- Added an unequal-power multi-speed regression that recovers overlapping Fast
+  and JS8 60 passbands with the stronger signal approximately 3.4 times the
+  weak signal amplitude.
 - Added JS8 alphabet packing, CRC-12 validation, `(174,87)` LDPC decoding,
   Costas synchronization, bounded recording scanning, and generic modem adapter
   integration through `qsonaut-modems` audio/events contracts.
@@ -110,8 +130,9 @@ All notable changes to `qsonaut-modems` are documented here.
 
 - Stronger noisy-channel/FEC convergence and candidate ranking.
 - Oracle-equivalent multi-signal subtraction and complete rolling-window
-  receiver semantics remain future work; the current cancellation pass is
-  deliberately limited to two signals per candidate window.
+  receiver semantics remain future work. The waterfall profile currently
+  extracts up to four signals per candidate window using bounded residual
+  cancellation.
 - Dense JSC compressed payload decoding and long-message reassembly remain
   future work; the new reassembler only joins already-decoded fragments and
   does not implement dense JSC decompression.

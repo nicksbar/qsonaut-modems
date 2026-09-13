@@ -70,6 +70,20 @@ mod tests {
         0, 1, 1, 1, 2, 1, 3, 0, 0, 0, 1, 4, 2, 5, 0, 6, 4, 1, 3,
     ];
 
+    // Generated directly by JS8Call Improved revision
+    // e8a6121d859ba3b678b3485e7a14ed07df1bbee4.
+    const CURRENT_NORMAL_DATA_GOLDEN: [u8; 79] = [
+        4, 2, 5, 6, 1, 3, 0, 6, 7, 0, 7, 3, 3, 5, 2, 4, 5, 4, 5, 6, 4, 7, 3, 3, 3, 4, 3, 4, 0, 5,
+        3, 5, 3, 4, 5, 5, 4, 2, 5, 6, 1, 3, 0, 2, 6, 1, 6, 2, 7, 3, 5, 3, 0, 3, 3, 0, 2, 0, 0, 0,
+        2, 0, 6, 1, 2, 1, 3, 4, 7, 4, 2, 4, 4, 2, 5, 6, 1, 3, 0,
+    ];
+
+    const CURRENT_MODIFIED_DATA_GOLDEN: [u8; 79] = [
+        0, 6, 2, 3, 5, 4, 1, 6, 7, 0, 7, 3, 3, 5, 2, 4, 5, 4, 5, 6, 4, 7, 3, 3, 3, 4, 3, 4, 0, 5,
+        3, 5, 3, 4, 5, 5, 1, 5, 0, 2, 3, 6, 4, 2, 6, 1, 6, 2, 7, 3, 5, 3, 0, 3, 3, 0, 2, 0, 0, 0,
+        2, 0, 6, 1, 2, 1, 3, 4, 7, 4, 2, 4, 2, 5, 0, 6, 4, 1, 3,
+    ];
+
     #[test]
     fn matches_oracle_normal_and_fast_tone_vectors() {
         assert_eq!(
@@ -80,6 +94,22 @@ mod tests {
             encode_tones("0123456789AB", 0, Js8Mode::Fast).unwrap(),
             FAST_GOLDEN
         );
+    }
+
+    #[test]
+    fn matches_current_mentor_data_vector_in_every_enabled_mode() {
+        assert_eq!(
+            encode_tones("MENTOR2026AB", 4, Js8Mode::Normal).unwrap(),
+            CURRENT_NORMAL_DATA_GOLDEN
+        );
+        for mode in [Js8Mode::Fast, Js8Mode::Turbo, Js8Mode::Slow, Js8Mode::Ultra] {
+            assert_eq!(
+                encode_tones("MENTOR2026AB", 4, mode).unwrap(),
+                CURRENT_MODIFIED_DATA_GOLDEN,
+                "current mentor mismatch in {}",
+                mode.display_name()
+            );
+        }
     }
 
     #[test]

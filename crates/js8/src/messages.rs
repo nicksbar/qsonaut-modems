@@ -41,6 +41,80 @@ pub struct Js8Command {
     pub number: Option<i8>,
 }
 
+impl Js8Command {
+    /// Return current mentor capability metadata for this wire command code.
+    pub const fn spec(&self) -> Option<Js8CommandSpec> {
+        command_spec(self.code)
+    }
+}
+
+/// Current mentor behavior attached to one directed-message command code.
+///
+/// These fields describe wire/application semantics. They do not instruct a
+/// consumer to transmit a reply or persist a payload automatically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Js8CommandSpec {
+    pub code: u8,
+    pub name: &'static str,
+    pub automatic_reply: bool,
+    pub buffered: bool,
+    pub accepts_snr: bool,
+    /// Checksum width for commands in the mentor checksum set. `Some(0)` is
+    /// retained for GRID because that distinction exists in the mentor table.
+    pub checksum_bits: Option<u8>,
+}
+
+/// Look up current mentor capability metadata for a JS8 command wire code.
+pub const fn command_spec(code: u8) -> Option<Js8CommandSpec> {
+    let name = match code {
+        0 => "SNR?",
+        1 => "DIT DIT",
+        2 => "NACK",
+        3 => "HEARING?",
+        4 => "GRID?",
+        5 => ">",
+        6 => "STATUS?",
+        7 => "STATUS",
+        8 => "HEARING",
+        9 => "MSG",
+        10 => "MSG TO:",
+        11 => "QUERY",
+        12 => "QUERY MSGS",
+        13 => "QUERY CALL",
+        14 => "ACK",
+        15 => "GRID",
+        16 => "INFO?",
+        17 => "INFO",
+        18 => "FB",
+        19 => "HW CPY?",
+        20 => "SK",
+        21 => "RR",
+        22 => "QSL?",
+        23 => "QSL",
+        24 => "CMD",
+        25 => "SNR",
+        26 => "NO",
+        27 => "YES",
+        28 => "73",
+        29 => "HEARTBEAT SNR",
+        30 => "AGN?",
+        31 => "TEXT",
+        _ => return None,
+    };
+    Some(Js8CommandSpec {
+        code,
+        name,
+        automatic_reply: matches!(code, 0 | 2 | 3 | 4 | 6 | 9..=14 | 16 | 30),
+        buffered: matches!(code, 5 | 9..=13 | 15 | 24),
+        accepts_snr: matches!(code, 25 | 29),
+        checksum_bits: match code {
+            5 | 9..=13 | 24 => Some(16),
+            15 => Some(0),
+            _ => None,
+        },
+    })
+}
+
 /// Errors returned when constructing a semantic JS8 frame.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum Js8MessageError {
@@ -522,21 +596,61 @@ fn pack_alphanumeric50(value: &str) -> Result<u64, Js8MessageError> {
 }
 
 fn pack_callsign(value: &str) -> Result<(u32, bool), Js8MessageError> {
-    let mut callsign = value.to_ascii_uppercase();
+    let mut callsign = value.trim().to_ascii_uppercase();
+    if let Some((index, _)) = BASE_CALLS
+        .iter()
+        .enumerate()
+        .find(|(_, candidate)| **candidate == callsign)
+    {
+        return Ok((N_BASE_CALL + index as u32 + 1, false));
+    }
     let portable = callsign.ends_with("/P");
     if portable {
         callsign.truncate(callsign.len() - 2);
     }
+    if callsign.starts_with("3DA0") {
+        callsign = format!("3D0{}", &callsign[4..]);
+    } else if callsign.starts_with("3X")
+        && callsign
+            .as_bytes()
+            .get(2)
+            .is_some_and(u8::is_ascii_uppercase)
+    {
+        callsign = format!("Q{}", &callsign[2..]);
+    }
     if !(2..=6).contains(&callsign.len())
         || !callsign
             .bytes()
-            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'/')
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
     {
         return Err(Js8MessageError::InvalidCallsign(value.to_owned()));
     }
-    let mut padded = callsign;
-    padded.extend(std::iter::repeat_n(' ', 6 - padded.len()));
-    let digits: Vec<_> = padded
+
+    let candidates = match callsign.len() {
+        2 => vec![callsign.clone(), format!(" {callsign}   ")],
+        3 => vec![
+            callsign.clone(),
+            format!(" {callsign}  "),
+            format!("{callsign}   "),
+        ],
+        4 => vec![
+            callsign.clone(),
+            format!(" {callsign} "),
+            format!("{callsign}  "),
+        ],
+        5 => vec![
+            callsign.clone(),
+            format!(" {callsign}"),
+            format!("{callsign} "),
+        ],
+        _ => vec![callsign],
+    };
+    let matched = candidates
+        .iter()
+        .rev()
+        .find(|candidate| is_packable_callsign(candidate))
+        .ok_or_else(|| Js8MessageError::InvalidCallsign(value.to_owned()))?;
+    let digits: Vec<_> = matched
         .bytes()
         .map(|byte| {
             ALPHANUMERIC
@@ -552,6 +666,17 @@ fn pack_callsign(value: &str) -> Result<(u32, bool), Js8MessageError> {
         packed = packed * 27 + digit - 10;
     }
     Ok((packed, portable))
+}
+
+fn is_packable_callsign(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 6
+        && (bytes[0] == b' ' || bytes[0].is_ascii_alphanumeric())
+        && bytes[1].is_ascii_alphanumeric()
+        && bytes[2].is_ascii_digit()
+        && bytes[3..]
+            .iter()
+            .all(|byte| *byte == b' ' || byte.is_ascii_uppercase())
 }
 
 fn pack_grid(value: &str) -> Result<u16, Js8MessageError> {
@@ -629,6 +754,12 @@ fn unpack_alphanumeric50(mut value: u64) -> String {
 }
 
 fn unpack_callsign(mut value: u32, portable: bool) -> String {
+    if let Some(index) = value
+        .checked_sub(N_BASE_CALL + 1)
+        .filter(|index| (*index as usize) < BASE_CALLS.len())
+    {
+        return BASE_CALLS[index as usize].to_owned();
+    }
     let mut word = [b' '; 6];
     word[5] = ALPHANUMERIC[(value % 27 + 10) as usize];
     value /= 27;
@@ -656,6 +787,66 @@ fn unpack_callsign(mut value: u32, portable: bool) -> String {
     }
     callsign
 }
+
+const N_BASE_CALL: u32 = 37 * 36 * 10 * 27 * 27 * 27;
+
+/// Reserved directed-message calls and groups in current mentor wire order.
+const BASE_CALLS: [&str; 54] = [
+    "<....>",
+    "@ALLCALL",
+    "@JS8NET",
+    "@DX/NA",
+    "@DX/SA",
+    "@DX/EU",
+    "@DX/AS",
+    "@DX/AF",
+    "@DX/OC",
+    "@DX/AN",
+    "@REGION/1",
+    "@REGION/2",
+    "@REGION/3",
+    "@GROUP/0",
+    "@GROUP/1",
+    "@GROUP/2",
+    "@GROUP/3",
+    "@GROUP/4",
+    "@GROUP/5",
+    "@GROUP/6",
+    "@GROUP/7",
+    "@GROUP/8",
+    "@GROUP/9",
+    "@COMMAND",
+    "@CONTROL",
+    "@NET",
+    "@NTS",
+    "@RESERVE/0",
+    "@RESERVE/1",
+    "@RESERVE/2",
+    "@RESERVE/3",
+    "@RESERVE/4",
+    "@APRSIS",
+    "@RAGCHEW",
+    "@JS8",
+    "@EMCOMM",
+    "@ARES",
+    "@MARS",
+    "@AMRRON",
+    "@RACES",
+    "@RAYNET",
+    "@RADAR",
+    "@SKYWARN",
+    "@CQ",
+    "@HB",
+    "@QSO",
+    "@QSOPARTY",
+    "@CONTEST",
+    "@FIELDDAY",
+    "@SOTA",
+    "@IOTA",
+    "@POTA",
+    "@QRP",
+    "@QRO",
+];
 
 fn unpack_grid(value: u16) -> Option<String> {
     if value > N_BASE_GRID {
@@ -693,48 +884,15 @@ fn unpack_compound_command(value: u16) -> Js8Command {
 }
 
 fn command_name(code: u8) -> &'static str {
-    match code {
-        0 => "SNR?",
-        1 => "DIT DIT",
-        2 => "NACK",
-        3 => "HEARING?",
-        4 => "GRID?",
-        5 => ">",
-        6 => "STATUS?",
-        7 => "STATUS",
-        8 => "HEARING",
-        9 => "MSG",
-        10 => "MSG TO:",
-        11 => "QUERY",
-        12 => "QUERY MSGS",
-        13 => "QUERY CALL",
-        14 => "ACK",
-        15 => "GRID",
-        16 => "INFO?",
-        17 => "INFO",
-        18 => "FB",
-        19 => "HW CPY?",
-        20 => "SK",
-        21 => "RR",
-        22 => "QSL?",
-        23 => "QSL",
-        24 => "CMD",
-        25 => "SNR",
-        26 => "NO",
-        27 => "YES",
-        28 => "73",
-        29 => "HEARTBEAT SNR",
-        30 => "AGN?",
-        31 => "TEXT",
-        _ => "UNKNOWN",
-    }
+    command_spec(code).map_or("UNKNOWN", |spec| spec.name)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_legacy_huffman_data, decode_message, encode_message, pack_bits, transmission_flags,
-        Js8Command, Js8FrameType, Js8Message, Js8MessageError, Js8MessageReassembler,
+        command_spec, decode_legacy_huffman_data, decode_message, encode_message, pack_bits,
+        transmission_flags, Js8Command, Js8FrameType, Js8Message, Js8MessageError,
+        Js8MessageReassembler,
     };
     use crate::Js8DecodedFrame;
 
@@ -808,6 +966,99 @@ mod tests {
             });
             assert_eq!(decoded, message);
         }
+    }
+
+    #[test]
+    fn directed_groups_round_trip_in_mentor_wire_order() {
+        for group in ["@ALLCALL", "@HB", "@POTA", "@QRO"] {
+            let message = Js8Message::Directed {
+                from: "KN4CRD".to_owned(),
+                to: group.to_owned(),
+                command: Js8Command {
+                    code: 3,
+                    name: "HEARING?".to_owned(),
+                    number: None,
+                },
+            };
+            let (payload, frame_type) = encode_message(&message).unwrap();
+            assert_eq!(
+                decode_message(&Js8DecodedFrame {
+                    message: payload,
+                    frame_type,
+                }),
+                message
+            );
+        }
+    }
+
+    #[test]
+    fn command_capabilities_match_current_mentor_sets() {
+        let specs: Vec<_> = (0..=31).map(|code| command_spec(code).unwrap()).collect();
+        assert_eq!(
+            specs
+                .iter()
+                .filter(|spec| spec.automatic_reply)
+                .map(|spec| spec.code)
+                .collect::<Vec<_>>(),
+            [0, 2, 3, 4, 6, 9, 10, 11, 12, 13, 14, 16, 30]
+        );
+        assert_eq!(
+            specs
+                .iter()
+                .filter(|spec| spec.buffered)
+                .map(|spec| spec.code)
+                .collect::<Vec<_>>(),
+            [5, 9, 10, 11, 12, 13, 15, 24]
+        );
+        assert_eq!(
+            specs
+                .iter()
+                .filter(|spec| spec.accepts_snr)
+                .map(|spec| spec.code)
+                .collect::<Vec<_>>(),
+            [25, 29]
+        );
+        assert_eq!(command_spec(5).unwrap().checksum_bits, Some(16));
+        assert_eq!(command_spec(15).unwrap().checksum_bits, Some(0));
+        assert_eq!(command_spec(31).unwrap().name, "TEXT");
+        assert!(command_spec(32).is_none());
+    }
+
+    #[test]
+    fn callsign_packing_matches_mentor_shape_and_aliases() {
+        for callsign in ["K1A", "AB1CD", "KN4CRD", "KN4CRD/P", "3DA0ABC", "3XY1AB"] {
+            let message = Js8Message::Directed {
+                from: callsign.to_owned(),
+                to: "@ALLCALL".to_owned(),
+                command: Js8Command {
+                    code: 28,
+                    name: "73".to_owned(),
+                    number: None,
+                },
+            };
+            let (payload, frame_type) = encode_message(&message).unwrap();
+            assert_eq!(
+                decode_message(&Js8DecodedFrame {
+                    message: payload,
+                    frame_type,
+                }),
+                message
+            );
+        }
+
+        let invalid = Js8Message::Directed {
+            from: "AB123".to_owned(),
+            to: "@ALLCALL".to_owned(),
+            command: Js8Command {
+                code: 28,
+                name: "73".to_owned(),
+                number: None,
+            },
+        };
+        assert!(matches!(
+            encode_message(&invalid),
+            Err(Js8MessageError::InvalidCallsign(_))
+        ));
     }
 
     #[test]
