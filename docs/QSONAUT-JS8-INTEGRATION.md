@@ -55,6 +55,43 @@ successful message that reappears within that sample distance across separate
 same transmission repeatedly. Call `reset()` when starting a new independent
 slot or recording.
 
+### Multi-speed receive
+
+JS8Call operators can transmit using Normal, Fast, JS8 40, Slow, or JS8 60.
+Use `Js8MultiRxSession::waterfall` when the consumer should monitor every
+enabled speed from the same capture stream:
+
+```rust
+use qsonaut_js8::{Js8MultiRxConfig, Js8MultiRxSession};
+
+let mut receiver = Js8MultiRxSession::waterfall(Js8MultiRxConfig::default())?;
+receiver.push_samples(&samples_12k_chunk)?;
+for result in receiver.poll(1)? {
+  println!(
+    "{}: {}",
+    result.mode.display_name(),
+    result.scan.result.event.message
+  );
+}
+```
+
+The default selects all five speeds. Each speed has an independent bounded
+session, so a Fast or JS8 60 frame can become available without waiting for a
+30-second Slow frame. To monitor only an active QSO speed, set
+`Js8MultiRxConfig::modes` explicitly. Selecting a station or audio frequency
+must not silently change this policy or retune the consumer.
+
+The mentor permits heartbeat networking on Slow, Normal, and Fast, but not on
+JS8 40 or JS8 60. Consumers can use
+`Js8Mode::supports_heartbeat_networking()` to constrain those controls while
+still allowing ordinary directed traffic at any enabled speed.
+
+Directed controls can use `command_spec(code)` or `Js8Command::spec()` to
+inspect the mentor's command name, autoreply classification, buffered-payload
+classification, checksum width, and SNR support. These are capabilities for a
+consumer to present and constrain; the modem never automatically replies,
+stores a message, or transmits merely because a command carries that metadata.
+
 ## TX path
 
 Build a validated 12 kHz mono block. The returned samples are normalized
@@ -219,7 +256,8 @@ strongest coarse peak.
 
 ## Current limitations
 
-- The default RX adapter remains single-signal. The recording scanner has
+- The default RX adapter remains single-speed. `Js8MultiRxSession` composes
+  bounded sessions for selected speeds, while the recording scanner has
   bounded waterfall-wide multi-signal extraction with shared FFT candidate
   acquisition when configured with an absolute frequency band and larger
   per-window limits; it is not a full JS8Call detector or scheduler.
@@ -311,12 +349,12 @@ strongest coarse peak.
   candidate spacing or scalar Costas weighting alone.
   Baseline subtraction is the first change to materially improve recall, but
   the final corpus total remains pending.
-- Duplicate suppression, CQ/heartbeat semantics, directed commands, and
-  application events remain consumer/message layers. Signal subtraction is
-  owned by the modem, but the current implementation is limited to two
-  signals per candidate window and does not claim full JS8Call parity.
-- The current public adapter is aligned to one frame/window, not a complete
-  multi-signal 60-second JS8Call receiver.
+- Application policy for CQ, heartbeat replies, directed commands, and events
+  remains consumer-owned. Signal subtraction is modem-owned; the waterfall
+  profile extracts up to four signals per candidate window but does not claim
+  full JS8Call parity.
+- The current public adapters operate on bounded per-speed frame windows, not
+  the mentor application's complete shared 60-second scheduling pipeline.
 - `Js8RxSession` provides bounded chunk ingestion and candidate polling for a
   consumer-owned worker. Successful bounded signal cancellation is retained in
   its rolling buffer across polls. It is not a clock or slot scheduler;
@@ -325,7 +363,7 @@ strongest coarse peak.
 
 Do not claim full JS8Call interoperability until oracle-generated audio,
 frequency/time offset sweeps, deterministic noise fixtures, and no-decode
-fixtures pass in both directions.
+fixtures pass in both directions, followed by receive-only on-air validation.
 
 ## Migration checklist
 

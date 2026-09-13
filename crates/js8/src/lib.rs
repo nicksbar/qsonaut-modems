@@ -15,6 +15,7 @@ mod frame;
 mod messages;
 mod metrics;
 mod mode;
+mod multi;
 mod receiver;
 mod scan;
 mod sync;
@@ -31,14 +32,18 @@ pub use errors::Js8SynthesisError;
 pub use fec::decode_codeword;
 pub use frame::encode_tones;
 pub use messages::{
-    decode_legacy_huffman_data, decode_message, encode_message, Js8Command, Js8FrameType,
-    Js8Message, Js8MessageError, Js8MessageReassembler,
+    command_spec, decode_legacy_huffman_data, decode_message, encode_message, Js8Command,
+    Js8CommandSpec, Js8FrameType, Js8Message, Js8MessageError, Js8MessageReassembler,
 };
 pub use metrics::{
     demodulate_bit_llrs, demodulate_soft, estimate_snr_db, tone_metrics_to_bit_llrs, Js8BitLlrs,
     Js8ToneMetrics,
 };
 pub use mode::Js8Mode;
+pub use multi::{
+    scan_audio_block_multi, scan_audio_block_multi_detailed, Js8MultiRxConfig, Js8MultiRxResult,
+    Js8MultiRxSession,
+};
 pub use qsonaut_modems::AudioBlock;
 pub use receiver::Js8RxSession;
 pub use scan::{scan_audio_block, scan_audio_block_detailed, Js8ScanConfig, Js8ScanResult};

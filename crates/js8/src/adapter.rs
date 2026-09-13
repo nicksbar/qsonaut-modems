@@ -86,6 +86,8 @@ pub enum Js8AdapterError {
     InvalidScanStep,
     #[error("JS8 scan candidate limit must be greater than zero")]
     InvalidScanLimit,
+    #[error("JS8 multi-speed receive requires at least one mode")]
+    EmptyModeSet,
     #[error("JS8 minimum sync quality must be finite and non-negative")]
     InvalidSyncQuality,
     #[error("JS8 sync frequency range must be finite and non-negative")]

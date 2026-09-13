@@ -4,9 +4,11 @@ This document is the research and implementation foundation for the first-party
 `qsonaut-js8` crate. The generic `qsonaut-modems` contract crate remains
 protocol-neutral; JS8 implementation code belongs in that sibling crate.
 
-The first pure frame-encoding milestone now exists in `qsonaut-js8`; audio
-synthesis, synchronization, decoding, and consumer integration remain future
-milestones.
+The crate now includes frame and message encoding, audio synthesis, bounded
+waterfall acquisition, multi-signal decoding, and single- or multi-speed
+streaming receiver primitives. No on-air interoperability claim is made yet;
+the remaining validation and mentor-parity gaps are tracked in
+[`JS8-MENTOR-PARITY.md`](JS8-MENTOR-PARITY.md).
 
 ## Decision summary
 
@@ -73,7 +75,15 @@ worker lifetime, cancellation, TX safety, UI, logging, and message workflow.
 
 ## Upstream oracle
 
-The primary oracle is the official JS8Call repository:
+The current compatibility mentor is JS8Call Improved:
+
+- Repository: <https://github.com/JS8Call-improved/JS8Call-improved>
+- Revision inspected for the 2026 parity review:
+  `e8a6121d859ba3b678b3485e7a14ed07df1bbee4`
+- License: GPL-3.0, see `COPYING`
+
+The original foundation was established against the historical JS8Call
+repository and remains useful for existing vectors and media fixtures:
 
 - Repository: <https://github.com/js8call/js8call>
 - Revision inspected for this foundation: `a7ff1be0b389d287fdc56e2ea0d06962aa68127d`
@@ -91,12 +101,14 @@ checkout used during this research is:
 
 ```text
 ~/.cache/rigforge/oracles/js8call
+~/.cache/rigforge/oracles/js8call-improved
 ```
 
 It is pinned to:
 
 ```text
 a7ff1be0b389d287fdc56e2ea0d06962aa68127d
+e8a6121d859ba3b678b3485e7a14ed07df1bbee4
 ```
 
 The checkout is a development tool, not a Cargo dependency and not a source
@@ -113,11 +125,11 @@ from the external oracle checkout only when `JS8CALL_MEDIA_TESTS` is set.
 
 | Upstream path | What to learn | Rust implementation consequence |
 | --- | --- | --- |
-| `commons.h` | Global sample rate, frame size, symbol count, mode constants, decoder buffer shape | Define internal JS8 mode parameters and explicit 12 kHz input validation. |
-| `JS8.hpp` | `JS8::encode`, Costas arrays, decode event fields, decoder public shape | Reproduce the encoder contract and normalize decoder metadata. |
-| `JS8.cpp` | Current C++ encoder, decoder, synchronization, downsampling, baseline, LDPC, signal subtraction | Port or independently implement behavior in small Rust modules; do not copy the Qt worker boundary. |
-| `JS8Submode.cpp/.hpp` | User-facing mode names, symbol/sample counts, durations, start delays, bandwidth and tone spacing | Create adapter-local mode metadata and slot recommendations. |
-| `varicode.cpp/.h` | Message commands, heartbeat/CQ parsing, directed command packing, extended characters | Implement the message layer separately from the physical codec. |
+| `JS8_Include/commons.h` | Global sample rate, frame size, symbol count, enabled modes, decoder buffer shape | Define internal JS8 mode parameters and explicit 12 kHz input validation. |
+| `JS8_Mode/JS8.hpp` | `JS8::encode`, Costas arrays, decode event fields, decoder public shape | Reproduce the encoder contract and normalize decoder metadata. |
+| `JS8_Mode/JS8.cpp` | Current C++ encoder, decoder, synchronization, downsampling, baseline, LDPC, signal subtraction | Port or independently implement behavior in small Rust modules; do not copy the Qt worker boundary. |
+| `JS8_Mode/JS8Submode.cpp` | User-facing mode names, symbol/sample counts, periods, start delays, bandwidth and tone spacing | Create adapter-local mode metadata and slot recommendations. |
+| `JS8_Main/Varicode.cpp/.h` | Message commands, heartbeat/CQ parsing, directed command packing, extended characters | Implement the message layer separately from the physical codec. |
 | `js8a_module.f90`, `js8b_module.f90`, `js8c_module.f90`, `js8e_module.f90`, `js8i_module.f90` | Historical/reference Fortran mode algorithms and constants | Use for cross-checking the C++ conversion and resolving behavior that is not obvious in `JS8.cpp`. |
 | `lib/js8*_decode.f90` | Historical decoder stages and numerical behavior | Use as a second oracle when porting synchronization or decoder math. |
 | `CMakeLists.txt` and `js8call.pro` | Actual source lists, compiler requirements, FFTW linkage, Qt coupling | Identify dependencies to avoid in a Rust implementation and record what was intentionally not ported. |
@@ -126,14 +138,16 @@ from the external oracle checkout only when `JS8CALL_MEDIA_TESTS` is set.
 
 ### Current constants to preserve
 
-At the inspected revision:
+At the current inspected mentor revision:
 
 - decoder input rate: **12,000 samples/second**;
 - receive ring/frame horizon: **60 seconds**;
 - frame contains **79 symbols**;
 - modes A/B/C/E/I use symbol sample counts of 1920/1200/600/3840/384;
-- nominal TX durations are 15/10/6/30/4 seconds for A/B/C/E/I;
-- current upstream build enables A/B/C/E and disables I through `commons.h`;
+- slot periods are 15/10/6/30/4 seconds for A/B/C/E/I;
+- start delays are 500/200/100/500/100 milliseconds for A/B/C/E/I;
+- the current mentor enables all five modes;
+- operator-facing mode names are Normal, Fast, JS8 40, Slow, and JS8 60;
 - mode A uses the original Costas arrays; the other modes use modified arrays;
 - the modem occupies an audio passband rather than an RF frequency. The decoded
   frequency is an audio offset in Hz.
@@ -316,13 +330,13 @@ this provenance review; the generic contract crate remains protocol-neutral.
 
 ## Milestones and stop conditions
 
-### Milestone 0: protocol notebook and oracle vectors
+### Milestone 0: protocol notebook and oracle vectors — refresh in progress
 
 Complete the source map, fixture schema, and exact pure-frame vectors before
 adding public Rust APIs. Stop if the oracle's bit ordering or mode constants
 cannot be reproduced exactly.
 
-### Milestone 1: pure Rust frame codec — complete
+### Milestone 1: pure Rust frame codec — implemented, current vectors pending
 
 Implement alphabet, payload/type packing, CRC, LDPC encode/decode, Costas arrays,
 and 79-tone vectors. Do not claim audio modem support yet.
@@ -337,7 +351,7 @@ The first implementation lives in the GPL-licensed `qsonaut-js8` crate. Its
 facade is intentionally small; alphabet packing, CRC, FEC, Costas data, frame
 assembly, mode metadata, and synthesis are separate modules.
 
-### Milestone 2: transmitter and clean loopback — in progress
+### Milestone 2: transmitter and clean loopback — implemented synthetically
 
 The initial transmitter now generates continuous-phase 12 kHz mono PCM for all
 known mode sample counts. Compare Rust-generated audio with the oracle and
@@ -350,7 +364,7 @@ Exit criteria:
 - frequency and timing conventions are documented;
 - no consumer or QSONaut changes are needed.
 
-### Milestone 3: synchronization and single-signal RX — started
+### Milestone 3: synchronization and single-signal RX — implemented, parity ongoing
 
 Add candidate search, timing/frequency refinement, soft metrics, and decode
 metadata. The first aligned 8-FSK correlator now recovers channel tones from a
@@ -362,21 +376,24 @@ provided grid. The soft metric layer now emits normalized per-symbol tone
 likelihoods and converts them to systematic-codeword bit LLRs. A bounded
 min-sum `(174,87)` decoder validates clean codewords and corrects the verified
 single-hard-bit case. Frame reconstruction now unpacks the 12-character
-payload, extracts the frame type, and validates CRC. Fine drift correction,
-robust noisy-channel convergence, and multi-signal subtraction are not
-implemented yet. Keep multi-signal subtraction disabled until single-signal
-parity is proven.
+payload, extracts the frame type, and validates CRC. Linear and quadratic
+carrier and sample-clock drift tracking, waterfall candidate ranking, and
+bounded residual cancellation now have deterministic coverage. Robust
+noisy-channel convergence and complete mentor corpus parity remain open.
 
-### Milestone 4: integration and additional modes
+### Milestone 4: integration and additional modes — implemented synthetically
 
-Extend `qsonaut-js8`, then implement B/C/E one at a time. Treat I as
-unsupported until upstream enables it and fixtures exist. Add normalized events
-and explicit errors without changing generic contracts.
+All five currently enabled modes have TX/RX loopback coverage, explicit timing
+metadata, normalized events, and single- or multi-speed receive APIs. Fresh
+mentor-generated vectors and receive-only RF comparison remain required.
 
-### Milestone 5: multi-signal and message behavior
+### Milestone 5: multi-signal and message behavior — partial
 
-Add subtraction, duplicate policy, directed-message parsing, heartbeat/CQ
-semantics, and application-facing helpers only in the adapter boundary.
+Bounded subtraction, duplicate policy, compact directed/group parsing,
+heartbeat/CQ semantics, legacy Huffman data, and fragment reassembly are
+implemented. Dense JSC text, complete current command fixtures, noisy overlap
+parity, and application-owned reply/rate-limit behavior remain open. See the
+dated [mentor parity matrix](JS8-MENTOR-PARITY.md).
 
 ## What not to do
 
@@ -396,11 +413,15 @@ semantics, and application-facing helpers only in the adapter boundary.
 
 ## References
 
-- Official source: <https://github.com/js8call/js8call>
-- Oracle revision: `a7ff1be0b389d287fdc56e2ea0d06962aa68127d`
-- JS8Call license: <https://github.com/js8call/js8call/blob/main/COPYING>
+- Current mentor source: <https://github.com/JS8Call-improved/JS8Call-improved>
+- Current mentor revision: `e8a6121d859ba3b678b3485e7a14ed07df1bbee4`
+- Historical oracle source: <https://github.com/js8call/js8call>
+- Historical oracle revision: `a7ff1be0b389d287fdc56e2ea0d06962aa68127d`
+- JS8Call Improved license:
+  <https://github.com/JS8Call-improved/JS8Call-improved/blob/master/COPYING>
 - JS8Call API wrapper (not a modem): <https://crates.io/crates/js8call_lib>
 - First-party architecture: [ARCHITECTURE.md](ARCHITECTURE.md)
 - Audio boundary: [AUDIO-BOUNDARY.md](AUDIO-BOUNDARY.md)
 - Consumer integration: [CONSUMER-INTEGRATION.md](CONSUMER-INTEGRATION.md)
- - QSONaut JS8 integration: [QSONAUT-JS8-INTEGRATION.md](QSONAUT-JS8-INTEGRATION.md)
+- QSONaut JS8 integration: [QSONAUT-JS8-INTEGRATION.md](QSONAUT-JS8-INTEGRATION.md)
+- Current parity status: [JS8-MENTOR-PARITY.md](JS8-MENTOR-PARITY.md)
