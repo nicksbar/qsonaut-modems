@@ -4,6 +4,13 @@ All notable changes to `qsonaut-modems` are documented here.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-09-21
+
+### Added
+
+- Added consumer-neutral deterministic modem fixture metadata, provenance, and
+  normalized decode validation contracts for adapters and applications.
+
 ### Added
 
 - Added explicit JS8Call and WSJT-X attribution, provenance, licensing-boundary,

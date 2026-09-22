@@ -7,6 +7,7 @@
 
 mod audio;
 mod events;
+mod fixtures;
 mod timing;
 mod voice;
 
@@ -15,6 +16,7 @@ pub use audio::{
     AudioError, AudioNormalizer, AudioRingBuffer, Decimator48To12,
 };
 pub use events::{DecodeBatch, DecodeEvent, DecodeTelemetry, ModemId};
+pub use fixtures::{FixtureDecode, FixtureError, FixtureProvenance, ModemFixture};
 pub use timing::{SlotGate, SlotSpec};
 pub use voice::{
     VoiceDirection, VoiceModemCapabilities, VoiceRxBlock, VoiceRxStatus, VoiceSyncState,
